@@ -1,6 +1,11 @@
 export const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 export const clamp01 = (x) => clamp(x, 0, 1);
 export const nz = (x) => (x === null || x === undefined || Number.isNaN(+x)) ? null : +x;
+export const toNumber = (v) => {
+if (v === null || v === undefined || v === '') return null;
+const n = +v;
+return Number.isNaN(n) ? null : n;
+};
 
 // treat strings like "21%", "0.21" or 21 -> return point-units (21)
 export const toPoints = (v) => {
