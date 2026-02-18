@@ -1,33 +1,3 @@
-<<<<<<< ours
-from fastapi import FastAPI
-from backend.database import engine, SessionLocal
-from backend import models
-
-# Create tables
-models.Base.metadata.create_all(bind=engine)
-
-# Create app FIRST
-app = FastAPI()
-
-
-@app.get("/metrics")
-def get_metrics():
-    db = SessionLocal()
-    try:
-        data = db.query(models.Metrics).all()
-        return [
-            {
-                "id": m.id,
-                "ticker_symbol": m.ticker_symbol,
-                "ticker": m.ticker,
-                "asOf": m.asOf,
-                "as_of_date": m.as_of_date,
-            }
-            for m in data
-        ]
-    finally:
-        db.close()
-=======
 from fastapi import Depends, FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -80,4 +50,3 @@ def list_prices(limit: int = 100, db: Session = Depends(get_db)):
 def list_lens_presets(limit: int = 100, db: Session = Depends(get_db)):
     rows = db.scalars(select(LensPreset).limit(limit)).all()
     return rows_to_dict(rows)
->>>>>>> theirs

@@ -21,7 +21,7 @@ def parse_date(value: str) -> date:
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1]
-    if "T" in text:
+    if "T" in text or " " in text:
         return datetime.fromisoformat(text).date()
     return date.fromisoformat(text)
 
@@ -90,8 +90,10 @@ def import_csv(session: Session, csv_path: Path, model) -> tuple[int, int]:
                     continue
 
                 session.merge(model(**payload))
+                session.flush()
                 imported_count += 1
             except Exception as exc:  # noqa: BLE001
+                session.rollback()
                 skipped_count += 1
                 logger.warning("%s:%s skipped row: %s", csv_path.name, line_no, exc)
 
