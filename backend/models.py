@@ -1,18 +1,3 @@
-<<<<<<< ours
-from sqlalchemy import Column, Integer, String, Float
-from database import Base
-
-class Metric(Base):
-    __tablename__ = "metrics"
-
-    id = Column(Integer, primary_key=True, index=True)
-    ticker_symbol = Column(String, index=True)
-    score = Column(Float)
-    value = Column(Float)
-    quality = Column(Float)
-    growth = Column(Float)
-    risk = Column(Float)
-=======
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -214,4 +199,3 @@ class LensPreset(Base):
     created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
     is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
->>>>>>> theirs
