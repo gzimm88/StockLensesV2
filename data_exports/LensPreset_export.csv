@@ -1,0 +1,8 @@
+id,name,valuation,quality,capitalAllocation,growth,moat,risk,macro,narrative,dilution,buyThreshold,watchThreshold,mosThreshold,scoringHints,created_date,updated_date,created_by_id,created_by,is_sample
+"689cc6ad170f8052354d0b3d","Guil's Lens","18","20","12","15","10","12","6","5","2","6.5","4.5","60","","2025-08-13T17:09:01.466000","2025-08-15T08:46:53.377000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17a8","Growth/Momentum","10","12","6","30","12","6","8","12","4","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:20:24.610000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17aa","Macro-Thematic","12","14","8","18","10","8","20","6","4","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:18:56.426000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17ab","Quality Compounder","10","25","12","18","18","7","4","4","2","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:44:55.173000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17a6","Conservative","22","22","15","8","10","15","5","1","2","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:45:37.139000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17a7","Value Purist","28","20","14","10","8","12","4","2","2","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:44:02.437000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
+"689b412dcdf95ca2f3fa17a9","Asymmetry Hunter","14","14","10","18","10","12","4","14","4","6.5","4.5","60","","2025-08-12T13:27:09.339000","2025-08-15T08:46:27.965000","689b401d1bb2cbab644a66ac","gzimm88@gmail.com","false"
