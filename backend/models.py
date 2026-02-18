@@ -1,3 +1,4 @@
+<<<<<<< ours
 from sqlalchemy import Column, Integer, String, Float
 from database import Base
 
@@ -11,3 +12,206 @@ class Metric(Base):
     quality = Column(Float)
     growth = Column(Float)
     risk = Column(Float)
+=======
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.database import Base
+
+
+class Ticker(Base):
+    __tablename__ = "tickers"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, unique=True, index=True)
+    exchange: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    sector: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    metrics: Mapped[list["Metrics"]] = relationship(back_populates="ticker_ref", cascade="all, delete-orphan")
+    financials_history: Mapped[list["FinancialsHistory"]] = relationship(
+        back_populates="ticker_ref", cascade="all, delete-orphan"
+    )
+    prices_history: Mapped[list["PricesHistory"]] = relationship(back_populates="ticker_ref", cascade="all, delete-orphan")
+
+
+class Metrics(Base):
+    __tablename__ = "metrics"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    ticker: Mapped[str | None] = mapped_column(String, nullable=True)
+    asOf: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    as_of_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    data_source: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    price_current: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_fwd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_fwd_sector: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ev_ebitda: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ev_ebitda_sector: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fcf_yield_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peg_5y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_12m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_24m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_36m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_5y_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_5y_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_5y_median: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roic_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fcf_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cfo_to_ni: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fcf_to_ebit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    accruals_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_stdev_5y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buyback_yield_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    debt_to_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    netdebt_to_ebitda: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interest_coverage_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_cagr_5y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_cagr_5y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_cagr_3y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_cagr_3y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moat_score_0_10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recurring_revenue_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    insider_own_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    founder_led_bool: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    gm_trend_5y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    riskdownside_score_0_10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beta_5y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    maxdrawdown_5y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    netcash_to_mktcap_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sector_cyc_tag: Mapped[str | None] = mapped_column(String, nullable=True)
+    macrofit_score_0_10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    narrative_score_0_10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sharecount_change_5y_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sbc_to_sales_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_growth_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_target_cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_pe_custom: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_pe_bear_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_pe_bull_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proj_pe_mid_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    partial_ttm: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    revenue_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cfo_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capex_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ebit_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ebitda_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_debt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_out: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interest_expense_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    ticker_ref: Mapped[Ticker] = relationship(back_populates="metrics")
+
+
+class FinancialsHistory(Base):
+    __tablename__ = "financials_history"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    period_end: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    freq: Mapped[str | None] = mapped_column(String, nullable=True)
+    revenue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_of_revenue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ebit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    research_development: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interest_expense: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_diluted: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_diluted: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_liabilities: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stockholder_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    short_term_investments: Mapped[float | None] = mapped_column(Float, nullable=True)
+    long_term_debt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_debt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_outstanding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cfo: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capex: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fcf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    depreciation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stock_based_compensation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    as_of_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+
+    created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    ticker_ref: Mapped[Ticker] = relationship(back_populates="financials_history")
+
+
+class PricesHistory(Base):
+    __tablename__ = "prices_history"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    close_adj: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    as_of_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+
+    created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    ticker_ref: Mapped[Ticker] = relationship(back_populates="prices_history")
+
+
+class LensPreset(Base):
+    __tablename__ = "lens_presets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, index=True)
+    valuation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quality: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capitalAllocation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    growth: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk: Mapped[float | None] = mapped_column(Float, nullable=True)
+    macro: Mapped[float | None] = mapped_column(Float, nullable=True)
+    narrative: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dilution: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buyThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    watchThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mosThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scoringHints: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+>>>>>>> theirs

@@ -1,20 +1,12 @@
-# Base44 App
+# StockLensesV2
 
+Frontend: Vite + React.
 
-This app was created automatically by Base44.
-It's a Vite+React app that communicates with the Base44 API.
+Backend: FastAPI + SQLAlchemy (SQLite), with import support for CSV exports in `data_exports/`.
 
-## Running the app
-
-```bash
-npm install
-npm run dev
-```
-
-## Building the app
+## Backend quickstart
 
 ```bash
-npm run build
+python -m backend.scripts.import_exports
+uvicorn backend.main:app --reload
 ```
-
-For more information and support, please contact Base44 support at app@base44.com.
