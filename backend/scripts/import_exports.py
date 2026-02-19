@@ -89,11 +89,10 @@ def import_csv(session: Session, csv_path: Path, model) -> tuple[int, int]:
                     logger.warning("%s:%s skipped row with empty id", csv_path.name, line_no)
                     continue
 
-                session.merge(model(**payload))
-                session.flush()
+                with session.begin_nested():
+                    session.merge(model(**payload))
                 imported_count += 1
             except Exception as exc:  # noqa: BLE001
-                session.rollback()
                 skipped_count += 1
                 logger.warning("%s:%s skipped row: %s", csv_path.name, line_no, exc)
 
