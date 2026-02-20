@@ -20,7 +20,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-FINNHUB_API_KEY: str = os.environ.get("FINNHUB_API_KEY", "")
+# Read lazily at call time so python-dotenv loaded in main.py takes effect.
+def _get_api_key() -> str:
+    return os.environ.get("FINNHUB_API_KEY", "")
+
 _BASE_URL: str = "https://finnhub.io/api/v1"
 _REQUEST_INTERVAL_MS: int = 1100
 _MAX_RETRIES: int = 3
@@ -91,26 +94,28 @@ def _build_url(path: str, **params: str) -> str:
 
 async def fetch_quarterly_financials(ticker: str) -> dict:
     """GET /stock/financials-reported?symbol={ticker}&freq=quarterly"""
-    if not FINNHUB_API_KEY:
+    key = _get_api_key()
+    if not key:
         raise RuntimeError("FINNHUB_API_KEY environment variable is not set")
     url = _build_url(
         "stock/financials-reported",
         symbol=ticker,
         freq="quarterly",
-        token=FINNHUB_API_KEY,
+        token=key,
     )
     return await gated_fetch(url)
 
 
 async def fetch_annual_financials(ticker: str) -> dict | None:
     """GET /stock/financials-reported?symbol={ticker}&freq=annual — returns None on failure."""
-    if not FINNHUB_API_KEY:
+    key = _get_api_key()
+    if not key:
         raise RuntimeError("FINNHUB_API_KEY environment variable is not set")
     url = _build_url(
         "stock/financials-reported",
         symbol=ticker,
         freq="annual",
-        token=FINNHUB_API_KEY,
+        token=key,
     )
     try:
         return await gated_fetch(url)

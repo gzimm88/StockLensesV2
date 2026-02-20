@@ -1,5 +1,20 @@
 import logging
+import os
+from pathlib import Path
 from typing import Any
+
+# Load .env from the repo root (two levels above this file: backend/main.py → repo/)
+# Must happen before any module that reads os.environ (e.g. finnhub_client).
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
+        logging.getLogger(__name__).info("[Config] Loaded .env from %s", _env_path)
+    else:
+        logging.getLogger(__name__).info("[Config] No .env file found at %s", _env_path)
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set externally
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
