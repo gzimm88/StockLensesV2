@@ -135,6 +135,9 @@ def upsert_metrics(
                 )
 
         if updates:
+            as_of = updates.pop("as_of_date", None)
+            if as_of:
+                existing.as_of_date = _parse_date(as_of)
             for k, v in updates.items():
                 if hasattr(existing, k):
                     setattr(existing, k, v)
@@ -191,6 +194,9 @@ def upsert_metrics_safe_patch(
     ).first()
 
     if existing:
+        as_of = clean.pop("as_of_date", None)
+        if as_of:
+            existing.as_of_date = _parse_date(as_of)
         for k, v in clean.items():
             if hasattr(existing, k):
                 setattr(existing, k, v)
