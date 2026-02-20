@@ -12,7 +12,7 @@ Upsert behavior (mirrors runYahooFundamentalsEtl.ts + saveFinancialsHistory.ts):
 
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import select, and_
@@ -37,10 +37,22 @@ def _parse_date(d: Any) -> date | None:
 
 
 def _row_to_dict(row: FinancialsHistory) -> dict[str, Any]:
-    return {
-        col.name: getattr(row, col.name)
-        for col in row.__table__.columns
-    }
+    """
+    Convert a FinancialsHistory ORM row to a plain dict.
+
+    Date/datetime columns are serialised to ISO-8601 strings so callers
+    (metrics_calculator, finnhub_normalizer) can safely do d[:7] slicing
+    on period_end and other date fields.
+    """
+    result: dict[str, Any] = {}
+    for col in row.__table__.columns:
+        val = getattr(row, col.name)
+        if isinstance(val, datetime):
+            val = val.isoformat()
+        elif isinstance(val, date):
+            val = val.isoformat()   # "YYYY-MM-DD"
+        result[col.name] = val
+    return result
 
 
 # Column names that are part of the idempotency key or metadata (not financial data)

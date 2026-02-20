@@ -32,10 +32,21 @@ INSERT_RETRY_DELAYS: list[float] = [1.5, 3.0, 5.0]   # seconds
 
 
 def _row_to_dict(row: PricesHistory) -> dict[str, Any]:
-    return {
-        col.name: getattr(row, col.name)
-        for col in row.__table__.columns
-    }
+    """
+    Convert a PricesHistory ORM row to a plain dict.
+
+    Date/datetime columns are serialised to ISO-8601 strings so callers
+    (finnhub_normalizer, metrics_calculator) can safely do d[:7] slicing.
+    """
+    result: dict[str, Any] = {}
+    for col in row.__table__.columns:
+        val = getattr(row, col.name)
+        if isinstance(val, datetime):
+            val = val.isoformat()
+        elif isinstance(val, date):
+            val = val.isoformat()   # "YYYY-MM-DD"
+        result[col.name] = val
+    return result
 
 
 def upsert_prices(
