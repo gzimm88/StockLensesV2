@@ -1,7 +1,8 @@
 import logging
 from typing import Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="StockLenses Backend")
 
+# Allow the Vite dev server to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 Base.metadata.create_all(bind=engine)
 
 
@@ -35,8 +45,12 @@ def rows_to_dict(rows):
     ]
 
 
+def row_to_dict(row):
+    return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+
 # ---------------------------------------------------------------------------
-# Existing read endpoints (unchanged)
+# Read endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
@@ -45,13 +59,13 @@ def healthcheck():
 
 
 @app.get("/tickers")
-def list_tickers(limit: int = 100, db: Session = Depends(get_db)):
+def list_tickers(limit: int = 500, db: Session = Depends(get_db)):
     rows = db.scalars(select(Ticker).limit(limit)).all()
     return rows_to_dict(rows)
 
 
 @app.get("/metrics")
-def list_metrics(limit: int = 100, db: Session = Depends(get_db)):
+def list_metrics(limit: int = 500, db: Session = Depends(get_db)):
     rows = db.scalars(select(Metrics).limit(limit)).all()
     return rows_to_dict(rows)
 
@@ -72,6 +86,131 @@ def list_prices(limit: int = 100, db: Session = Depends(get_db)):
 def list_lens_presets(limit: int = 100, db: Session = Depends(get_db)):
     rows = db.scalars(select(LensPreset).limit(limit)).all()
     return rows_to_dict(rows)
+
+
+# ---------------------------------------------------------------------------
+# Ticker CRUD
+# ---------------------------------------------------------------------------
+
+@app.get("/tickers/filter")
+def filter_tickers(symbol: str | None = None, db: Session = Depends(get_db)):
+    """Filter tickers by symbol (exact match, case-insensitive)."""
+    q = select(Ticker)
+    if symbol:
+        q = q.where(Ticker.symbol == symbol.upper())
+    rows = db.scalars(q).all()
+    return rows_to_dict(rows)
+
+
+@app.post("/tickers", status_code=201)
+def create_ticker(body: dict, db: Session = Depends(get_db)):
+    """Create a new ticker row."""
+    # Prevent duplicate symbol
+    existing = db.scalars(
+        select(Ticker).where(Ticker.symbol == body.get("symbol", "").upper())
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Ticker already exists")
+
+    ticker = Ticker(**{k: v for k, v in body.items() if hasattr(Ticker, k)})
+    db.add(ticker)
+    db.commit()
+    db.refresh(ticker)
+    return row_to_dict(ticker)
+
+
+@app.patch("/tickers/{ticker_id}")
+def update_ticker(ticker_id: str, body: dict, db: Session = Depends(get_db)):
+    """Partial-update a ticker row by id."""
+    row = db.get(Ticker, ticker_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Ticker not found")
+    for key, value in body.items():
+        if hasattr(Ticker, key) and key != "id":
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row_to_dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Metrics CRUD
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics/filter")
+def filter_metrics(ticker_symbol: str | None = None, db: Session = Depends(get_db)):
+    """Filter metrics by ticker_symbol."""
+    q = select(Metrics)
+    if ticker_symbol:
+        q = q.where(Metrics.ticker_symbol == ticker_symbol.upper())
+    rows = db.scalars(q).all()
+    return rows_to_dict(rows)
+
+
+@app.post("/metrics", status_code=201)
+def create_metrics(body: dict, db: Session = Depends(get_db)):
+    """Create a new metrics row."""
+    m = Metrics(**{k: v for k, v in body.items() if hasattr(Metrics, k)})
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return row_to_dict(m)
+
+
+@app.patch("/metrics/{metrics_id}")
+def update_metrics(metrics_id: str, body: dict, db: Session = Depends(get_db)):
+    """Partial-update a metrics row by id."""
+    row = db.get(Metrics, metrics_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Metrics not found")
+    for key, value in body.items():
+        if hasattr(Metrics, key) and key != "id":
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row_to_dict(row)
+
+
+# ---------------------------------------------------------------------------
+# LensPreset CRUD
+# ---------------------------------------------------------------------------
+
+@app.post("/lens-presets", status_code=201)
+def create_lens_preset(body: dict, db: Session = Depends(get_db)):
+    """Create a new lens preset."""
+    existing = db.get(LensPreset, body.get("id"))
+    if existing:
+        raise HTTPException(status_code=409, detail="Lens preset with this id already exists")
+    lp = LensPreset(**{k: v for k, v in body.items() if hasattr(LensPreset, k)})
+    db.add(lp)
+    db.commit()
+    db.refresh(lp)
+    return row_to_dict(lp)
+
+
+@app.patch("/lens-presets/{preset_id}")
+def update_lens_preset(preset_id: str, body: dict, db: Session = Depends(get_db)):
+    """Partial-update a lens preset by id."""
+    row = db.get(LensPreset, preset_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Lens preset not found")
+    for key, value in body.items():
+        if hasattr(LensPreset, key) and key != "id":
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row_to_dict(row)
+
+
+@app.delete("/lens-presets/{preset_id}", status_code=204)
+def delete_lens_preset(preset_id: str, db: Session = Depends(get_db)):
+    """Delete a lens preset by id."""
+    row = db.get(LensPreset, preset_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Lens preset not found")
+    db.delete(row)
+    db.commit()
+    return None
 
 
 # ---------------------------------------------------------------------------
