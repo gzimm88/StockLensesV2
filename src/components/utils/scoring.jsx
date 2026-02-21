@@ -60,15 +60,21 @@ function scoreCapitalAllocation(m) {
 
 // D) Growth (simple average)
 function scoreGrowth(m) {
-    const eps5y = cap10(toPoints(m.eps_cagr_5y_pct) / 2);
-    const rev5y = cap10(toPoints(m.rev_cagr_5y_pct) / 2);
+    const eps5yRaw = toPoints(m.eps_cagr_5y_pct);
+    const eps5y = eps5yRaw == null ? null : cap10(eps5yRaw / 2);
+    const rev5yRaw = toPoints(m.revenue_cagr_5y_pct ?? m.rev_cagr_5y_pct);
+    const rev3yRaw = toPoints(m.revenue_cagr_3y_pct ?? m.rev_cagr_3y_pct);
+    const rev5y = rev5yRaw == null ? null : cap10(rev5yRaw / 2);
     const acceleration = (() => {
-        const acc = (toPoints(m.eps_cagr_3y_pct) - toPoints(m.eps_cagr_5y_pct)) + (toPoints(m.rev_cagr_3y_pct) - toPoints(m.rev_cagr_5y_pct));
-        if (isNaN(acc)) return null;
+        const eps3yRaw = toPoints(m.eps_cagr_3y_pct);
+        const eps5yRaw = toPoints(m.eps_cagr_5y_pct);
+        if (eps3yRaw == null || eps5yRaw == null || rev3yRaw == null || rev5yRaw == null) return null;
+        const acc = (eps3yRaw - eps5yRaw) + (rev3yRaw - rev5yRaw);
+        if (!Number.isFinite(acc)) return null;
         return cap10(5 + 0.5 * acc);
     })();
     const stage_tag = (() => {
-        const r = toPoints(m.rev_cagr_5y_pct);
+        const r = rev5yRaw;
         if (r == null) return null;
         if (r >= 25) return 10;
         if (r >= 15) return 8;

@@ -77,6 +77,23 @@ import { getLatestMosForTicker } from "../components/projections/getMos";
 import { cleanBand } from "../components/utils/peBand";
 import ScoreTraceDrawer from "../components/debug/ScoreTraceDrawer";
 
+const CONFIDENCE_FIELDS = [
+  "price_current", "eps_ttm", "pe_ttm", "pe_fwd",
+  "pe_5y_low", "pe_5y_high", "fcf_yield_pct", "ev_ebitda",
+  "roic_pct", "fcf_margin_pct", "cfo_to_ni", "debt_to_equity",
+  "interest_coverage_x", "eps_cagr_5y_pct", "revenue_cagr_5y_pct",
+  "moat_score_0_10", "riskdownside_score_0_10",
+];
+
+const calculateConfidencePct = (metric) => {
+  if (!metric) return 0;
+  const present = CONFIDENCE_FIELDS.filter((key) => {
+    const value = metric[key];
+    return typeof value === "number" && Number.isFinite(value);
+  }).length;
+  return (present / CONFIDENCE_FIELDS.length) * 100;
+};
+
 const ScoreBreakdown = ({ name, score, details }) => (
     <Card>
         <CardHeader className="pb-2">
@@ -155,9 +172,9 @@ const StockDetailDrawer = ({ ticker, metrics }) => {
           score: scores.growth,
           details: {
               "EPS CAGR 5Y %": metrics.eps_cagr_5y_pct,
-              "Revenue CAGR 5Y %": metrics.revenue_cagr_5y_pct,
+              "Revenue CAGR 5Y %": metrics.revenue_cagr_5y_pct ?? metrics.rev_cagr_5y_pct,
               "EPS CAGR 3Y %": metrics.eps_cagr_3y_pct,
-              "Revenue CAGR 3Y %": metrics.rev_cagr_3y_pct,
+              "Revenue CAGR 3Y %": metrics.revenue_cagr_3y_pct ?? metrics.rev_cagr_3y_pct,
           }
       },
       Moat: {
@@ -561,7 +578,14 @@ export default function Screener() {
       const mos = getLatestMosForTicker(ticker.symbol);
       const lensConfig = lensRec[selectedLens.name] || lensRec["Conservative"];
       
-      const { rec, mosStatus } = recommend(finalScore, mos, lensConfig.mos);
+      const confidence = calculateConfidencePct(metric);
+      const { rec, mosStatus, confStatus } = recommend(finalScore, mos, {
+        buy: lensConfig.buy,
+        watch: lensConfig.watch,
+        mos: lensConfig.mos,
+        conf: lensConfig.conf,
+        confidence,
+      });
       
       return {
         ticker,
@@ -570,6 +594,8 @@ export default function Screener() {
         finalScore,
         recommendation: rec,
         mosStatus: mosStatus,
+        confStatus,
+        confidence,
         mos,
       };
     }).filter(Boolean);
@@ -631,7 +657,7 @@ export default function Screener() {
     
     const headers = [
       'symbol', 'name', 'lens', 'recommendation', 'finalScore',
-      'buy_threshold', 'watch_threshold', 'mos_threshold', 'mos_value', 'pe_low', 'pe_high', 'pe_ttm',
+      'buy_threshold', 'watch_threshold', 'mos_threshold', 'conf_threshold', 'mos_value', 'confidence_value', 'pe_low', 'pe_high', 'pe_ttm',
       'pe_band_source',
       ...Object.keys(enrichedData[0].scores),
       'exportedAt',
@@ -647,10 +673,12 @@ export default function Screener() {
         selectedLens.name,
         item.recommendation,
         item.finalScore.toFixed(2),
-        lensConfig.buy || 8.0,
-        lensConfig.watch || 6.5,
+        lensConfig.buy || 6.5,
+        lensConfig.watch || 4.5,
         lensConfig.mos || 0,
-        item.mos ? (item.mos * 100).toFixed(1) + '%' : 'N/A',
+        lensConfig.conf || 0,
+        item.mos != null ? (item.mos * 100).toFixed(1) + '%' : 'N/A',
+        `${item.confidence.toFixed(1)}%`,
         low ?? '',
         high ?? '',
         ttm ?? '',
@@ -1045,7 +1073,7 @@ export default function Screener() {
                         </div>
                     </div>
                     <div className="text-xs text-slate-500 bg-white px-2 py-1 rounded border">
-                        Buy ≥{(lensConfig.buy || 8.0).toFixed(1)} | Watch ≥{(lensConfig.watch || 6.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}
+                        Buy ≥{(lensConfig.buy || 6.5).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
                     </div>
                 </div>
             )}
@@ -1151,19 +1179,27 @@ export default function Screener() {
                                                 {item.mosStatus && (
                                                     <Badge variant="outline" className="text-xs px-1.5 py-0.5">{item.mosStatus}</Badge>
                                                 )}
+                                                {item.confStatus && (
+                                                    <Badge variant="outline" className="text-xs px-1.5 py-0.5">
+                                                      Conf {item.confStatus}
+                                                    </Badge>
+                                                )}
                                             </div>
                                         </TooltipTrigger>
                                         <TooltipContent>
                                             <div className="text-xs">
                                                 <p className="font-semibold">Based on {selectedLens.name}</p>
                                                 {lensConfig && (
-                                                    <p>Buy≥{(lensConfig.buy || 8.0).toFixed(1)}, Watch≥{(lensConfig.watch || 6.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}</p>
+                                                    <p>Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}</p>
                                                 )}
                                                 {item.mos !== null && (
                                                     <p className="mt-1 text-slate-600">
                                                         Current MOS: {(item.mos * 100).toFixed(1)}%
                                                     </p>
                                                 )}
+                                                <p className="mt-1 text-slate-600">
+                                                    Data Confidence: {item.confidence.toFixed(1)}%
+                                                </p>
                                             </div>
                                         </TooltipContent>
                                     </Tooltip>
