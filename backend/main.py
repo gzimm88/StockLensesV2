@@ -10,10 +10,10 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — set FINNHUB_API_KEY in the shell
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from backend.database import Base, engine, get_db
@@ -37,13 +37,30 @@ app = FastAPI(title="StockLenses Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_metrics_schema() -> None:
+    """Add backward-compatible columns that may be missing in existing SQLite DBs."""
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(metrics)"))}
+        if "eps_forward" not in cols:
+            conn.execute(text("ALTER TABLE metrics ADD COLUMN eps_forward FLOAT"))
+
+
+_ensure_metrics_schema()
 
 
 def rows_to_dict(rows):
@@ -66,6 +83,32 @@ def healthcheck():
 def list_tickers(limit: int = 100, db: Session = Depends(get_db)):
     rows = db.scalars(select(Ticker).limit(limit)).all()
     return rows_to_dict(rows)
+
+
+@app.delete("/watchlist/{ticker}")
+def delete_watchlist_ticker(ticker: str, db: Session = Depends(get_db)):
+    ticker_upper = ticker.strip().upper()
+    row = db.scalars(select(Ticker).where(Ticker.symbol == ticker_upper)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"{ticker_upper} not found in watch list")
+
+    metrics_count = len(row.metrics or [])
+    financials_count = len(row.financials_history or [])
+    prices_count = len(row.prices_history or [])
+
+    db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "ticker": ticker_upper,
+        "deleted": {
+            "ticker": 1,
+            "metrics": metrics_count,
+            "financials_history": financials_count,
+            "prices_history": prices_count,
+        },
+    }
 
 
 @app.get("/metrics")

@@ -566,6 +566,7 @@ def calculate_historical_pe(
 # ---------------------------------------------------------------------------
 
 ALWAYS_UPDATE: frozenset[str] = frozenset([
+    "eps_forward",
     "eps_ttm", "pe_ttm", "pe_12m", "pe_24m", "pe_36m", "current_pe",
     "cfo_ttm", "capex_ttm", "sbc_ttm", "depreciation_ttm", "ebit_ttm", "ebitda_ttm",
     "net_income_ttm", "cash", "total_debt", "equity", "total_assets",

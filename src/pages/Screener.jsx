@@ -24,6 +24,17 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
   Download,
   Search,
   TrendingUp,
@@ -35,6 +46,9 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  RefreshCw,
+  Trash2,
+  ClipboardList,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "@/utils";
@@ -203,7 +217,7 @@ const StockDetailDrawer = ({ ticker, metrics }) => {
 // ---------------------------------------------------------------------------
 const BACKEND = "http://localhost:8000";
 
-const AddStockModal = ({ onAdded }) => {
+const AddStockModal = ({ onAdded, existingSymbols = [] }) => {
   const [open, setOpen] = useState(false);
   const [symbol, setSymbol] = useState("");
   const [status, setStatus] = useState("idle"); // idle | loading | ok | error
@@ -221,14 +235,16 @@ const AddStockModal = ({ onAdded }) => {
   const handleSubmit = async () => {
     const ticker = symbol.trim().toUpperCase();
     if (!ticker) return;
+    const existsInWatchlist = existingSymbols.includes(ticker);
+    const endpoint = existsInWatchlist ? "refresh" : "onboard";
     setStatus("loading");
     setResult(null);
     setError("");
     try {
-      const res = await fetch(`${BACKEND}/onboard/${encodeURIComponent(ticker)}`, {
+      const res = await fetch(`${BACKEND}/${endpoint}/${encodeURIComponent(ticker)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: false }),
+        body: JSON.stringify({ force: existsInWatchlist }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -246,7 +262,7 @@ const AddStockModal = ({ onAdded }) => {
 
   const handleDone = () => {
     setOpen(false);
-    if (status === "ok") onAdded();
+    if (status === "ok") onAdded(result);
   };
 
   const stepBadge = (ok) =>
@@ -284,8 +300,8 @@ const AddStockModal = ({ onAdded }) => {
                 autoFocus
               />
               <p className="text-xs text-slate-500">
-                If the ticker is already in the DB, the pipeline is skipped and
-                the existing data is used immediately.
+                If the ticker is already in your watch list, this runs a full refresh
+                instead of skipping.
               </p>
             </div>
           )}
@@ -491,6 +507,13 @@ export default function Screener() {
   const [traceDrawerData, setTraceDrawerData] = useState(null);
   const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [minScoreFilter, setMinScoreFilter] = useState(0);
+  const [isBulkUpdating, setIsBulkUpdating] = useState(false);
+  const [bulkUpdateStatus, setBulkUpdateStatus] = useState(null);
+  const [activeTab, setActiveTab] = useState("results");
+  const [onboardingRuns, setOnboardingRuns] = useState([]);
+  const [deleteCandidate, setDeleteCandidate] = useState(null);
+  const [isDeletingTicker, setIsDeletingTicker] = useState(false);
+  const [rowRefreshing, setRowRefreshing] = useState({});
 
   useEffect(() => {
     loadData();
@@ -679,6 +702,212 @@ export default function Screener() {
     setTraceDrawerOpen(true);
   };
 
+  const addOnboardingRun = (run, source = "manual") => {
+    if (!run?.ticker) return;
+    const timestamp = new Date().toISOString();
+    setOnboardingRuns((prev) => [
+      {
+        id: `${run.ticker}-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+        source,
+        timestamp,
+        ...run,
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleBulkUpdate = async () => {
+    const symbols = [...new Set(
+      tickers.map((ticker) => normalizeSymbol(ticker?.symbol)).filter(Boolean)
+    )];
+
+    if (symbols.length === 0) {
+      setBulkUpdateStatus({ type: "error", message: "No stocks in watch list to update." });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Run full onboarding refresh for ${symbols.length} stock(s)? This may take a while.`
+    );
+    if (!confirmed) {
+      setBulkUpdateStatus({ type: "running", message: "Bulk update canceled." });
+      return;
+    }
+
+    setIsBulkUpdating(true);
+    setBulkUpdateStatus({ type: "running", message: `Updating 0/${symbols.length}...` });
+
+    let okCount = 0;
+    let failCount = 0;
+    const failedTickers = [];
+    const batchLogs = [];
+
+    for (let i = 0; i < symbols.length; i++) {
+      const symbol = symbols[i];
+      setBulkUpdateStatus({ type: "running", message: `Updating ${i + 1}/${symbols.length}: ${symbol}` });
+
+      try {
+        const res = await fetch(`${BACKEND}/refresh/${encodeURIComponent(symbol)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: true }),
+        });
+
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`;
+          let responseData = null;
+          try {
+            responseData = await res.json();
+            detail = responseData?.detail ?? responseData?.message ?? detail;
+          } catch {
+            // Keep default detail if no JSON body is returned
+          }
+          failCount += 1;
+          failedTickers.push(`${symbol} (${detail})`);
+          batchLogs.push({
+            ticker: symbol,
+            status: "error",
+            message: detail,
+            errors: [detail],
+            logs: responseData?.logs ?? [`Bulk refresh failed for ${symbol}: ${detail}`],
+            steps: responseData?.steps ?? {},
+            ok: false,
+          });
+          continue;
+        }
+
+        const data = await res.json();
+        okCount += 1;
+        batchLogs.push({
+          ticker: symbol,
+          status: data?.status ?? "ok",
+          message: data?.message ?? `Refresh completed for ${symbol}`,
+          errors: data?.errors ?? [],
+          logs: data?.logs ?? [],
+          steps: data?.steps ?? {},
+          ok: true,
+        });
+      } catch (error) {
+        failCount += 1;
+        failedTickers.push(`${symbol} (${error.message})`);
+        batchLogs.push({
+          ticker: symbol,
+          status: "error",
+          message: error.message,
+          errors: [error.message],
+          logs: [`Bulk refresh failed for ${symbol}: ${error.message}`],
+          steps: {},
+          ok: false,
+        });
+      }
+    }
+
+    await loadData();
+    setIsBulkUpdating(false);
+    batchLogs.forEach((entry) => addOnboardingRun(entry, "bulk"));
+
+    if (failCount === 0) {
+      setBulkUpdateStatus({
+        type: "ok",
+        message: `Updated ${okCount}/${symbols.length} stocks successfully.`,
+      });
+      return;
+    }
+
+    setBulkUpdateStatus({
+      type: "error",
+      message: `Updated ${okCount}/${symbols.length}. Failed: ${failCount}.`,
+      details: failedTickers.slice(0, 5),
+    });
+  };
+
+  const handleAddStockDone = async (runResult) => {
+    if (runResult) {
+      addOnboardingRun(runResult, "single");
+    }
+    await loadData();
+  };
+
+  const handleRequestDeleteTicker = (ticker, event) => {
+    event.stopPropagation();
+    setDeleteCandidate(ticker);
+  };
+
+  const handleConfirmDeleteTicker = async () => {
+    if (!deleteCandidate?.symbol) return;
+
+    setIsDeletingTicker(true);
+    const symbol = normalizeSymbol(deleteCandidate.symbol);
+    try {
+      const res = await fetch(`${BACKEND}/watchlist/${encodeURIComponent(symbol)}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.detail ?? `HTTP ${res.status}`);
+      }
+
+      setBulkUpdateStatus({
+        type: "ok",
+        message: `${symbol} removed from watch list.`,
+      });
+      setDeleteCandidate(null);
+      await loadData();
+    } catch (error) {
+      setBulkUpdateStatus({
+        type: "error",
+        message: `Could not delete ${symbol}: ${error.message}`,
+      });
+      setDeleteCandidate(null);
+    } finally {
+      setIsDeletingTicker(false);
+    }
+  };
+
+  const handleRefreshTicker = async (ticker, event) => {
+    event.stopPropagation();
+    const symbol = normalizeSymbol(ticker?.symbol);
+    if (!symbol) return;
+
+    setRowRefreshing((prev) => ({ ...prev, [symbol]: true }));
+    try {
+      const res = await fetch(`${BACKEND}/refresh/${encodeURIComponent(symbol)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.detail ?? data?.message ?? `HTTP ${res.status}`);
+      }
+
+      addOnboardingRun(data, "row-refresh");
+      setBulkUpdateStatus({
+        type: "ok",
+        message: `${symbol} refreshed successfully.`,
+      });
+      await loadData();
+    } catch (error) {
+      addOnboardingRun(
+        {
+          ticker: symbol,
+          status: "error",
+          message: error.message,
+          errors: [error.message],
+          logs: [`Row refresh failed for ${symbol}: ${error.message}`],
+          steps: {},
+        },
+        "row-refresh"
+      );
+      setBulkUpdateStatus({
+        type: "error",
+        message: `Could not refresh ${symbol}: ${error.message}`,
+      });
+    } finally {
+      setRowRefreshing((prev) => ({ ...prev, [symbol]: false }));
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -703,13 +932,47 @@ export default function Screener() {
           </div>
           <div className="flex items-center gap-3">
             <CSVImporter onImported={loadData} />
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={handleBulkUpdate}
+              disabled={isBulkUpdating || tickers.length === 0}
+            >
+              {isBulkUpdating ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              {isBulkUpdating ? "Updating..." : "Update All"}
+            </Button>
             <Button variant="outline" onClick={downloadCSV} className="gap-2">
               <Download className="w-4 h-4" />
               Export CSV
             </Button>
-            <AddStockModal onAdded={loadData} />
+            <AddStockModal
+              onAdded={handleAddStockDone}
+              existingSymbols={tickers.map((t) => normalizeSymbol(t?.symbol)).filter(Boolean)}
+            />
           </div>
         </div>
+        {bulkUpdateStatus && (
+          <div
+            className={`text-sm ${
+              bulkUpdateStatus.type === "error"
+                ? "text-red-600"
+                : bulkUpdateStatus.type === "ok"
+                ? "text-green-700"
+                : "text-slate-600"
+            }`}
+          >
+            {bulkUpdateStatus.message}
+            {bulkUpdateStatus.details?.length > 0 && (
+              <span className="ml-2 text-xs text-slate-500">
+                {bulkUpdateStatus.details.join(" | ")}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Controls */}
         <Card>
@@ -789,163 +1052,250 @@ export default function Screener() {
           </CardContent>
         </Card>
 
-        {/* Results */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Filter className="w-5 h-5" />
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+          <TabsList>
+            <TabsTrigger value="results" className="gap-2">
+              <Filter className="w-4 h-4" />
               Analysis Results
-              {selectedLens && (
-                <Badge variant="outline" className="ml-auto">
-                  {selectedLens.name}
-                </Badge>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="rounded-lg border overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-slate-50">
-                    <TableHead 
-                      className="cursor-pointer hover:bg-slate-100 transition-colors"
-                      onClick={() => handleSort("ticker")}
-                    >
-                      Ticker
-                    </TableHead>
-                    <TableHead>Company</TableHead>
-                    <TableHead
-                      className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
-                      onClick={() => handleSort("recommendation")}
-                    >
-                        Rec.
-                    </TableHead>
-                    <TableHead 
-                      className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
-                      onClick={() => handleSort("finalScore")}
-                    >
-                      Score
-                    </TableHead>
-                    <TooltipProvider>
-                      {[
-                        { key: "valuation", name: "Val", tooltip: "Relative, PEG, FCF Yield..." },
-                        { key: "quality", name: "Qual", tooltip: "ROIC, Margins, Cash Conv..." },
-                        { key: "capitalAllocation", name: "Cap", tooltip: "Buybacks, Debt, ROIIC..." },
-                        { key: "growth", name: "Growth", tooltip: "CAGR, Acceleration..." },
-                        { key: "moat", name: "Moat", tooltip: "Recurring Rev, Ownership..." },
-                        { key: "risk", name: "Risk", tooltip: "Debt, Beta, Drawdown..." },
-                      ].map(cat => (
-                        <Tooltip key={cat.key} delayDuration={100}>
-                          <TooltipTrigger asChild>
-                            <TableHead 
-                                className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
-                                onClick={() => handleSort(cat.key)}
-                            >
-                                {cat.name}
-                                {sortField === cat.key && (
-                                    <ArrowUpDown className={`inline-block ml-1 h-3 w-3 ${sortDirection === 'asc' ? 'rotate-180' : ''}`} />
-                                )}
-                            </TableHead>
-                          </TooltipTrigger>
-                          <TooltipContent><p>{cat.tooltip}</p></TooltipContent>
-                        </Tooltip>
-                      ))}
-                    </TooltipProvider>
-                    <TableHead className="text-right">PE Fwd</TableHead>
-                    <TableHead className="text-right">FCF Yield</TableHead>
-                    <TableHead className="text-center">Trace</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {enrichedData.map((item) => (
-                    <SheetTrigger asChild key={item.ticker.symbol}>
-                      <TableRow className="hover:bg-slate-50 cursor-pointer" onClick={() => handleRowClick(item)}>
-                        <TableCell className="font-mono font-medium text-slate-900">{item.ticker.symbol}</TableCell>
-                        <TableCell>
-                          <p className="font-medium text-slate-900">{item.ticker.name}</p>
-                        </TableCell>
-                        <TableCell className="text-center">
-                            <TooltipProvider>
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="gap-2">
+              <ClipboardList className="w-4 h-4" />
+              Onboarding Logs
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="results">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Filter className="w-5 h-5" />
+                  Analysis Results
+                  {selectedLens && (
+                    <Badge variant="outline" className="ml-auto">
+                      {selectedLens.name}
+                    </Badge>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="rounded-lg border overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-slate-50">
+                        <TableHead
+                          className="cursor-pointer hover:bg-slate-100 transition-colors"
+                          onClick={() => handleSort("ticker")}
+                        >
+                          Ticker
+                        </TableHead>
+                        <TableHead>Company</TableHead>
+                        <TableHead
+                          className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
+                          onClick={() => handleSort("recommendation")}
+                        >
+                            Rec.
+                        </TableHead>
+                        <TableHead
+                          className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
+                          onClick={() => handleSort("finalScore")}
+                        >
+                          Score
+                        </TableHead>
+                        <TooltipProvider>
+                          {[
+                            { key: "valuation", name: "Val", tooltip: "Relative, PEG, FCF Yield..." },
+                            { key: "quality", name: "Qual", tooltip: "ROIC, Margins, Cash Conv..." },
+                            { key: "capitalAllocation", name: "Cap", tooltip: "Buybacks, Debt, ROIIC..." },
+                            { key: "growth", name: "Growth", tooltip: "CAGR, Acceleration..." },
+                            { key: "moat", name: "Moat", tooltip: "Recurring Rev, Ownership..." },
+                            { key: "risk", name: "Risk", tooltip: "Debt, Beta, Drawdown..." },
+                          ].map(cat => (
+                            <Tooltip key={cat.key} delayDuration={100}>
+                              <TooltipTrigger asChild>
+                                <TableHead
+                                    className="cursor-pointer hover:bg-slate-100 transition-colors text-center"
+                                    onClick={() => handleSort(cat.key)}
+                                >
+                                    {cat.name}
+                                    {sortField === cat.key && (
+                                        <ArrowUpDown className={`inline-block ml-1 h-3 w-3 ${sortDirection === 'asc' ? 'rotate-180' : ''}`} />
+                                    )}
+                                </TableHead>
+                              </TooltipTrigger>
+                              <TooltipContent><p>{cat.tooltip}</p></TooltipContent>
+                            </Tooltip>
+                          ))}
+                        </TooltipProvider>
+                        <TableHead className="text-right">PE Fwd</TableHead>
+                        <TableHead className="text-right">FCF Yield</TableHead>
+                        <TableHead className="text-center">Trace</TableHead>
+                        <TableHead className="text-center">Watchlist</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {enrichedData.map((item) => (
+                        <SheetTrigger asChild key={item.ticker.symbol}>
+                          <TableRow className="hover:bg-slate-50 cursor-pointer" onClick={() => handleRowClick(item)}>
+                            <TableCell className="font-mono font-medium text-slate-900">{item.ticker.symbol}</TableCell>
+                            <TableCell>
+                              <p className="font-medium text-slate-900">{item.ticker.name || item.ticker.symbol}</p>
+                            </TableCell>
+                            <TableCell className="text-center">
+                                <TooltipProvider>
+                                    <Tooltip delayDuration={100}>
+                                        <TooltipTrigger asChild>
+                                            <div className="flex items-center justify-center gap-1">
+                                                <Badge className={`${getRecommendationBadge(item.recommendation)} font-semibold text-xs cursor-help`}>
+                                                    {item.recommendation}
+                                                </Badge>
+                                                {item.mosStatus && (
+                                                    <Badge variant="outline" className="text-xs px-1.5 py-0.5">{item.mosStatus}</Badge>
+                                                )}
+                                            </div>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                            <div className="text-xs">
+                                                <p className="font-semibold">Based on {selectedLens.name}</p>
+                                                {lensConfig && (
+                                                    <p>Buy≥{(lensConfig.buy || 8.0).toFixed(1)}, Watch≥{(lensConfig.watch || 6.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}</p>
+                                                )}
+                                                {item.mos !== null && (
+                                                    <p className="mt-1 text-slate-600">
+                                                        Current MOS: {(item.mos * 100).toFixed(1)}%
+                                                    </p>
+                                                )}
+                                            </div>
+                                        </TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <TooltipProvider>
                                 <Tooltip delayDuration={100}>
                                     <TooltipTrigger asChild>
-                                        <div className="flex items-center justify-center gap-1">
-                                            <Badge className={`${getRecommendationBadge(item.recommendation)} font-semibold text-xs cursor-help`}>
-                                                {item.recommendation}
-                                            </Badge>
-                                            {item.mosStatus && (
-                                                <Badge variant="outline" className="text-xs px-1.5 py-0.5">{item.mosStatus}</Badge>
-                                            )}
-                                        </div>
+                                        <Badge className={`font-mono ${getScoreColor(item.finalScore)}`}>
+                                            {item.finalScore.toFixed(2)}
+                                        </Badge>
                                     </TooltipTrigger>
-                                    <TooltipContent>
-                                        <div className="text-xs">
-                                            <p className="font-semibold">Based on {selectedLens.name}</p>
-                                            {lensConfig && (
-                                                <p>Buy≥{(lensConfig.buy || 8.0).toFixed(1)}, Watch≥{(lensConfig.watch || 6.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}</p>
-                                            )}
-                                            {item.mos !== null && (
-                                                <p className="mt-1 text-slate-600">
-                                                    Current MOS: {(item.mos * 100).toFixed(1)}%
-                                                </p>
-                                            )}
-                                        </div>
-                                    </TooltipContent>
+                                    {selectedLens && <TooltipContent><ScoreTooltipContent scores={item.scores} lens={selectedLens} /></TooltipContent>}
                                 </Tooltip>
-                            </TooltipProvider>
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <TooltipProvider>
-                            <Tooltip delayDuration={100}>
-                                <TooltipTrigger asChild>
-                                    <Badge className={`font-mono ${getScoreColor(item.finalScore)}`}>
-                                        {item.finalScore.toFixed(2)}
-                                    </Badge>
-                                </TooltipTrigger>
-                                {selectedLens && <TooltipContent><ScoreTooltipContent scores={item.scores} lens={selectedLens} /></TooltipContent>}
-                            </Tooltip>
-                          </TooltipProvider>
-                        </TableCell>
-                        {Object.keys(item.scores).filter(k => ["valuation", "quality", "capitalAllocation", "growth", "moat", "risk"].includes(k)).map((key) => (
-                          <TableCell key={key} className="text-center">
-                            <span className={`px-2 py-1 rounded text-xs font-medium ${
-                              item.scores[key] != null ? getScoreColor(item.scores[key]) : 'text-slate-400'
-                            }`}>
-                              {item.scores[key] != null ? item.scores[key].toFixed(1) : '--'}
-                            </span>
-                          </TableCell>
-                        ))}
-                        <TableCell className="text-right font-mono">
-                          {item.metrics.pe_fwd != null ? item.metrics.pe_fwd.toFixed(1) : '--'}
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {item.metrics.fcf_yield_pct ? `${item.metrics.fcf_yield_pct.toFixed(1)}%` : '--'}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => handleTraceClick(item, e)}
-                            className="h-8 w-8 p-0"
-                          >
-                            <Bug className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    </SheetTrigger>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-            
-            {enrichedData.length === 0 && (
-              <div className="p-8 text-center text-slate-500">
-                <TrendingUp className="w-12 h-12 mx-auto mb-4 text-slate-300" />
-                <p className="text-lg font-medium">No stocks found</p>
-                <p>Try adjusting your search criteria or add some stocks to analyze</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                              </TooltipProvider>
+                            </TableCell>
+                            {Object.keys(item.scores).filter(k => ["valuation", "quality", "capitalAllocation", "growth", "moat", "risk"].includes(k)).map((key) => (
+                              <TableCell key={key} className="text-center">
+                                <span className={`px-2 py-1 rounded text-xs font-medium ${
+                                  item.scores[key] != null ? getScoreColor(item.scores[key]) : 'text-slate-400'
+                                }`}>
+                                  {item.scores[key] != null ? item.scores[key].toFixed(1) : '--'}
+                                </span>
+                              </TableCell>
+                            ))}
+                            <TableCell className="text-right font-mono">
+                              {item.metrics.pe_fwd != null ? item.metrics.pe_fwd.toFixed(1) : '--'}
+                            </TableCell>
+                            <TableCell className="text-right font-mono">
+                              {item.metrics.fcf_yield_pct ? `${item.metrics.fcf_yield_pct.toFixed(1)}%` : '--'}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => handleTraceClick(item, e)}
+                                className="h-8 w-8 p-0"
+                              >
+                                <Bug className="h-4 w-4" />
+                              </Button>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => handleRefreshTicker(item.ticker, e)}
+                                  disabled={!!rowRefreshing[normalizeSymbol(item.ticker.symbol)]}
+                                  className="h-8 w-8 p-0 text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                                >
+                                  {rowRefreshing[normalizeSymbol(item.ticker.symbol)] ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="h-4 w-4" />
+                                  )}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => handleRequestDeleteTicker(item.ticker, e)}
+                                  className="h-8 w-8 p-0 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        </SheetTrigger>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {enrichedData.length === 0 && (
+                  <div className="p-8 text-center text-slate-500">
+                    <TrendingUp className="w-12 h-12 mx-auto mb-4 text-slate-300" />
+                    <p className="text-lg font-medium">No stocks found</p>
+                    <p>Try adjusting your search criteria or add some stocks to analyze</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="logs">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <ClipboardList className="w-5 h-5" />
+                  Onboarding Logs
+                  <Badge variant="outline" className="ml-auto">
+                    {onboardingRuns.length} run{onboardingRuns.length === 1 ? "" : "s"}
+                  </Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {onboardingRuns.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    No onboarding runs yet. Use Add Stock or Update All to generate logs.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {onboardingRuns.map((run) => (
+                      <div key={run.id} className="border rounded-lg p-3 bg-slate-50">
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                          <Badge variant={run.status === "ok" || run.status === "skipped" ? "default" : "destructive"}>
+                            {run.status || "unknown"}
+                          </Badge>
+                          <span className="font-mono font-semibold">{run.ticker}</span>
+                          <span className="text-xs text-slate-500">
+                            {new Date(run.timestamp).toLocaleString()}
+                          </span>
+                          <Badge variant="outline" className="ml-auto">{run.source}</Badge>
+                        </div>
+                        <p className="text-sm text-slate-700 mb-2">{run.message || "Onboarding run completed."}</p>
+                        {run.errors?.length > 0 && (
+                          <div className="text-xs text-red-600 mb-2">
+                            {run.errors.join(" | ")}
+                          </div>
+                        )}
+                        <pre className="text-xs bg-white border rounded p-2 overflow-x-auto max-h-56 overflow-y-auto whitespace-pre-wrap">
+{(run.logs && run.logs.length > 0 ? run.logs : ["No logs returned by backend."]).join("\n")}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </div>
       {detailTicker && <StockDetailDrawer ticker={detailTicker.ticker} metrics={detailTicker.metrics} />}
       {traceDrawerData && (
@@ -957,6 +1307,26 @@ export default function Screener() {
           onClose={() => setTraceDrawerOpen(false)}
         />
       )}
+      <AlertDialog open={!!deleteCandidate} onOpenChange={(open) => !open && setDeleteCandidate(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {deleteCandidate?.symbol} from watch list?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove the ticker and its local metrics, price history, and financial history from the local database.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeletingTicker}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteTicker}
+              disabled={isDeletingTicker}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {isDeletingTicker ? "Deleting..." : "Delete Stock"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Sheet>
   );
 }

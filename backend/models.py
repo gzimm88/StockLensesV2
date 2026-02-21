@@ -37,6 +37,7 @@ class Metrics(Base):
 
     price_current: Mapped[float | None] = mapped_column(Float, nullable=True)
     eps_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_forward: Mapped[float | None] = mapped_column(Float, nullable=True)
     pe_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
     pe_fwd: Mapped[float | None] = mapped_column(Float, nullable=True)
     pe_fwd_sector: Mapped[float | None] = mapped_column(Float, nullable=True)

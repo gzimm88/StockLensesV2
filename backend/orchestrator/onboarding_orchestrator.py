@@ -275,6 +275,12 @@ def step_compute_fundamental_metrics(
         annual=annual,
         prices=prices,
         spy_prices=spy_prices,
+        existing_metrics=metrics_repo.get_metrics(db, ticker),
+    )
+    result.log(
+        f"[Step D][PE_FWD] ticker={ticker} price_current={payload.get('price_current')} "
+        f"eps_forward={payload.get('eps_forward')} pe_fwd={payload.get('pe_fwd')} "
+        "formula=price_current/eps_forward"
     )
 
     # Add sector PE/EV medians if sector known
@@ -329,9 +335,19 @@ async def run_full_onboard(
     try:
         import uuid as _uuid
         existing_ticker = db.query(Ticker).filter(Ticker.symbol == ticker).first()
-        if not existing_ticker:
+        info = {}
+        need_info_lookup = (
+            not existing_ticker
+            or not (existing_ticker.name or "").strip()
+            or (existing_ticker.name or "").strip().upper() == ticker
+            or not (existing_ticker.exchange or "").strip()
+            or not (existing_ticker.sector or "").strip()
+        )
+        if need_info_lookup:
             import yfinance as yf
             info = yf.Ticker(ticker).info or {}
+
+        if not existing_ticker:
             ticker_row = Ticker(
                 id=str(_uuid.uuid4()),
                 symbol=ticker,
@@ -343,10 +359,31 @@ async def run_full_onboard(
             db.commit()
             result.log(f"[Pre] Created ticker row for {ticker}")
         else:
-            # Update sector if provided and not already set
+            updated = False
+            fetched_name = (info.get("longName") or info.get("shortName") or "").strip()
+            if fetched_name and (
+                not (existing_ticker.name or "").strip()
+                or (existing_ticker.name or "").strip().upper() == ticker
+            ):
+                existing_ticker.name = fetched_name
+                updated = True
+                result.log(f"[Pre] Updated ticker name for {ticker} -> {fetched_name}")
+
+            if info.get("exchange") and not (existing_ticker.exchange or "").strip():
+                existing_ticker.exchange = info.get("exchange")
+                updated = True
+
+            # Update sector if provided and not already set; fallback to Yahoo sector.
             if sector and not existing_ticker.sector:
                 existing_ticker.sector = sector
+                updated = True
+            elif info.get("sector") and not existing_ticker.sector:
+                existing_ticker.sector = info.get("sector")
+                updated = True
+
+            if updated:
                 db.commit()
+                result.log(f"[Pre] Refreshed metadata for {ticker}")
             result.log(f"[Pre] Ticker row already exists for {ticker}")
     except Exception as exc:
         result.log(f"[Pre] Warning: could not upsert ticker row: {exc}")
@@ -418,6 +455,18 @@ async def run_full_onboard(
             result.step_success("F:price_metrics", {"fields": len(price_m)})
         except Exception as exc:
             result.step_failed("F:price_metrics", str(exc))
+
+        # Final debug snapshot for traceability in UI log tab
+        try:
+            latest = metrics_repo.get_metrics(db, ticker) or {}
+            result.log(
+                "[Final] Metrics snapshot "
+                f"pe_fwd={latest.get('pe_fwd')} pe_ttm={latest.get('pe_ttm')} "
+                f"eps_ttm={latest.get('eps_ttm')} as_of_date={latest.get('as_of_date')} "
+                f"data_source={latest.get('data_source')}"
+            )
+        except Exception as exc:
+            result.log(f"[Final] Warning: could not load metrics snapshot: {exc}")
 
     final_status = "ok" if not result.errors else "partial"
     result.status = final_status

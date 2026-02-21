@@ -22,6 +22,8 @@ from backend.models import FinancialsHistory
 
 logger = logging.getLogger(__name__)
 
+_DATE_FIELDS = frozenset(["period_end", "as_of_date"])
+
 
 def _parse_date(d: Any) -> date | None:
     if d is None:
@@ -34,6 +36,15 @@ def _parse_date(d: Any) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def _normalize_record_dates(record: dict[str, Any]) -> dict[str, Any]:
+    """Ensure Date columns are Python date objects (or None)."""
+    normalized = dict(record)
+    for field in _DATE_FIELDS:
+        if field in normalized:
+            normalized[field] = _parse_date(normalized.get(field))
+    return normalized
 
 
 def _row_to_dict(row: FinancialsHistory) -> dict[str, Any]:
@@ -64,15 +75,18 @@ def upsert_financials(
         return 0
 
     upserted = 0
+    inserted = 0
+    updated = 0
     for record in records:
+        record = _normalize_record_dates(record)
         ticker = record.get("ticker")
-        period_end_str = record.get("period_end")
+        period_end_val = record.get("period_end")
         freq = record.get("freq")
 
-        if not ticker or not period_end_str or not freq:
+        if not ticker or not period_end_val or not freq:
             continue
 
-        period_end = _parse_date(period_end_str)
+        period_end = _parse_date(period_end_val)
         if period_end is None:
             continue
 
@@ -101,14 +115,12 @@ def upsert_financials(
             # Update: only overwrite with non-null incoming values
             for k, v in clean_data.items():
                 if hasattr(existing, k):
+                    if k in _DATE_FIELDS:
+                        v = _parse_date(v)
                     setattr(existing, k, v)
-            try:
-                db.commit()
-                upserted += 1
-            except Exception as exc:
-                db.rollback()
-                logger.error("[DB][Financials] update failed for %s %s %s: %s",
-                             ticker, period_end_str, freq, exc)
+            db.commit()
+            upserted += 1
+            updated += 1
         else:
             # Insert new record
             obj = FinancialsHistory(
@@ -119,17 +131,21 @@ def upsert_financials(
             )
             for k, v in clean_data.items():
                 if hasattr(obj, k):
+                    if k in _DATE_FIELDS:
+                        v = _parse_date(v)
                     setattr(obj, k, v)
-            try:
-                db.add(obj)
-                db.commit()
-                upserted += 1
-            except Exception as exc:
-                db.rollback()
-                logger.error("[DB][Financials] insert failed for %s %s %s: %s",
-                             ticker, period_end_str, freq, exc)
+            db.add(obj)
+            db.commit()
+            upserted += 1
+            inserted += 1
 
-    logger.info("[DB][Financials] upserted %d/%d records", upserted, len(records))
+    logger.info(
+        "[DB][Financials] upserted %d/%d records (inserted=%d updated=%d)",
+        upserted,
+        len(records),
+        inserted,
+        updated,
+    )
     return upserted
 
 

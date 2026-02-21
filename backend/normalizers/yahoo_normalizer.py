@@ -436,8 +436,6 @@ def build_yahoo_metrics_payload(
     )
     market_cap = _num_raw(source_q.get("price", {}).get("marketCap"))
     shares_out = _num_raw(source_q.get("defaultKeyStatistics", {}).get("sharesOutstanding"))
-    pe_fwd = _num_raw(source_q.get("summaryDetail", {}).get("forwardPE"))
-    pe_ttm = _num_raw(source_q.get("summaryDetail", {}).get("trailingPE"))
     beta_5y = _num_raw(source_q.get("defaultKeyStatistics", {}).get("beta"))
 
     enterprise_value = _pick_num(
@@ -448,11 +446,6 @@ def build_yahoo_metrics_payload(
         source_q.get("defaultKeyStatistics", {}).get("enterpriseToEbitda"),
         source_q.get("financialData", {}).get("enterpriseToEbitda"),
     )
-    current_pe = _pick_num(
-        source_q.get("summaryDetail", {}).get("trailingPE"),
-        source_q.get("defaultKeyStatistics", {}).get("trailingPE"),
-    )
-
     # ------------------------------------------------------------------
     # EV/EBITDA: compute from EV and EBITDA_TTM first, fallback to direct field
     # ------------------------------------------------------------------
@@ -565,6 +558,7 @@ def build_yahoo_metrics_payload(
     # PEG 5Y  (yfinance trailingPegRatio)
     # ------------------------------------------------------------------
     peg_5y = _yf("trailingPegRatio")
+    eps_forward = _yf("forwardEps")
 
     # ------------------------------------------------------------------
     # SBC / Sales %
@@ -649,10 +643,8 @@ def build_yahoo_metrics_payload(
         "price_current": price_current,
         "market_cap": market_cap,
         "shares_out": shares_out,
+        "eps_forward": eps_forward,
         # Valuation multiples
-        "pe_fwd": pe_fwd,
-        "pe_ttm": pe_ttm,
-        "current_pe": current_pe,
         "ev_ebitda": ev_ebitda,
         "fcf_yield_pct": fcf_yield_pct,
         "peg_5y": peg_5y,
