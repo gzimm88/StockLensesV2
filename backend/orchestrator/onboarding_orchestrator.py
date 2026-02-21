@@ -110,9 +110,10 @@ async def step_finnhub_fundamentals(
     """Step B: Finnhub Fundamentals ETL. Mirrors runFinnhubFundamentalsEtl."""
     result.log(f"[Step B] Finnhub Fundamentals ETL for {ticker}")
 
-    q_data, a_data = await asyncio.gather(
+    q_data, a_data, basic_data = await asyncio.gather(
         finnhub_client.fetch_quarterly_financials(ticker),
         finnhub_client.fetch_annual_financials(ticker),
+        finnhub_client.fetch_basic_financials(ticker),
     )
 
     quarters = finnhub_normalizer.normalize_and_quarterize(q_data, a_data)
@@ -165,6 +166,16 @@ async def step_finnhub_fundamentals(
     eps_ttm = ttm.get("eps_ttm")
     pe_ttm_val = (latest_price / eps_ttm) if _is_num(latest_price) and _is_num(eps_ttm) and eps_ttm > 0 else None
 
+    # Extract 5Y CAGR values from Finnhub basic financials (metric endpoint)
+    fh_metric = basic_data.get("metric", {}) if isinstance(basic_data, dict) else {}
+    def _fh_num(key: str) -> float | None:
+        v = fh_metric.get(key)
+        try:
+            f = float(v)
+            return f if f == f else None  # NaN check
+        except (TypeError, ValueError):
+            return None
+
     metrics_payload = {
         **ttm,
         "eps_ttm": eps_ttm,
@@ -173,6 +184,11 @@ async def step_finnhub_fundamentals(
         "pe_24m": pe_hist.get("pe_24m"),
         "pe_36m": pe_hist.get("pe_36m"),
         "current_pe": pe_ttm_val,
+        # 5Y CAGR from Finnhub /stock/metric (epsGrowth5Y, revenueGrowth5Y are already in %)
+        "eps_cagr_5y_pct": _fh_num("epsGrowth5Y"),
+        "revenue_cagr_5y_pct": _fh_num("revenueGrowth5Y"),
+        # Also grab insider ownership if available
+        "insider_own_pct": _fh_num("heldPercentInsidersAnnual") or _fh_num("insiderSharePercentage"),
     }
 
     metrics_repo.upsert_metrics(db, ticker, metrics_payload, source_tag="finnhub")

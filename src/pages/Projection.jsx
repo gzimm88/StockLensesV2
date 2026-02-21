@@ -178,7 +178,7 @@ export default function Projection() {
     if (!symbol) {
       setCurrentBand({ bear: null, mid: null, bull: null });
       setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
-      setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" })); // Clear inputs
+      setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
       return;
     }
 
@@ -187,26 +187,37 @@ export default function Projection() {
       if (metricsData && metricsData.length > 0) {
         const metric = metricsData[0];
         const { low, high } = cleanBand(metric.pe_5y_low, metric.pe_5y_high, metric.pe_ttm);
-        const mid = bandMid(low, high);
-        const band = { bear: low, mid, bull: high };
+
+        // Primary: use 5Y historical PE low/high from DB
+        let bearPE = low;
+        let bullPE = high;
+
+        // Fallback: if 5Y PE band is missing, derive from pe_ttm (current PE)
+        // Bear = current PE * 0.7, Bull = current PE * 1.3 (±30% spread)
+        if ((bearPE == null || bullPE == null) && metric.pe_ttm && isFinite(metric.pe_ttm) && metric.pe_ttm > 0) {
+          const basePE = metric.pe_ttm;
+          bearPE = bearPE ?? parseFloat((basePE * 0.7).toFixed(1));
+          bullPE = bullPE ?? parseFloat((basePE * 1.3).toFixed(1));
+        }
+
+        const midPE = bandMid(bearPE, bullPE);
+        const band = { bear: bearPE, mid: midPE, bull: bullPE };
         setCurrentBand(band);
 
         const newInputs = { ...inputs };
         const newSources = { ...peBandSources };
 
         // Only update fields that haven't been manually edited in this session
-        // peBear
         if (!peBandEdited.bear) {
           if (band.bear != null) {
             newInputs.peBear = band.bear.toFixed(1).toString();
-            newSources.bear = "auto";
+            newSources.bear = low != null ? "auto" : "auto:estimated";
           } else {
             newInputs.peBear = "";
             newSources.bear = "manual";
           }
         }
 
-        // peMid
         if (!peBandEdited.mid) {
           if (band.mid != null) {
             newInputs.peMid = band.mid.toFixed(1).toString();
@@ -217,11 +228,10 @@ export default function Projection() {
           }
         }
 
-        // peBull
         if (!peBandEdited.bull) {
           if (band.bull != null) {
             newInputs.peBull = band.bull.toFixed(1).toString();
-            newSources.bull = "auto";
+            newSources.bull = high != null ? "auto" : "auto:estimated";
           } else {
             newInputs.peBull = "";
             newSources.bull = "manual";
@@ -231,14 +241,12 @@ export default function Projection() {
         setInputs(newInputs);
         setPeBandSources(newSources);
       } else {
-        // If no metrics data, reset to manual and clear values
         setCurrentBand({ bear: null, mid: null, bull: null });
         setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
         setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
       }
     } catch (error) {
       console.error("Error fetching P/E band:", error);
-      // Fallback: If error, reset to manual and clear values
       setCurrentBand({ bear: null, mid: null, bull: null });
       setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
       setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
@@ -668,8 +676,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.bear === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.bear === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.bear !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.bear === "auto" ? "Auto (5Y low)" : peBandSources.bear === "auto:estimated" ? "Auto (est. ±PE)" : "Manual"}
                     </Badge>
                   </div>
                 </div>
@@ -685,7 +693,7 @@ export default function Projection() {
                       onChange={(e) => handlePEBandChange("mid", e.target.value)}
                       placeholder={peBandSources.mid === "manual" ? "Manual required" : ""}
                     />
-                    {peBandSources.mid === "auto" && (
+                    {peBandSources.mid !== "manual" && (
                       <Button
                         variant="outline"
                         size="icon"
@@ -697,8 +705,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.mid === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.mid === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.mid !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.mid !== "manual" ? "Auto (avg)" : "Manual"}
                     </Badge>
                   </div>
                 </div>
@@ -714,7 +722,7 @@ export default function Projection() {
                       onChange={(e) => handlePEBandChange("bull", e.target.value)}
                       placeholder={peBandSources.bull === "manual" ? "Manual required" : ""}
                     />
-                    {peBandSources.bull === "auto" && (
+                    {peBandSources.bull !== "manual" && (
                       <Button
                         variant="outline"
                         size="icon"
@@ -726,8 +734,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.bull === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.bull === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.bull !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.bull === "auto" ? "Auto (5Y high)" : peBandSources.bull === "auto:estimated" ? "Auto (est. ±PE)" : "Manual"}
                     </Badge>
                   </div>
                 </div>
