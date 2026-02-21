@@ -45,6 +45,8 @@ import { cleanBand, bandMid } from "../components/utils/peBand";
 import { cacheLatestMosForTicker } from "../components/projections/getMos";
 import { normalizeSymbol } from "../components/utils/normalizeSymbol";
 
+const EPS_GROWTH_ASSUMPTIONS_KEY = "projection_eps_growth_assumptions_v1";
+
 const SCENARIOS = {
   bear: "Bear Case",
   trend: "Current Trend", 
@@ -62,12 +64,13 @@ export default function Projection() {
   const [inputs, setInputs] = useState({
     priceToday: 100,
     EPS0: 5,
-    growthRate: 0.15, // 15%
+    growthRate: 0.10, // 10%
     years: 5,
-    targetCAGR: 0.12, // 12%
+    targetCAGR: 0.15, // 15%
     peBear: "", // Changed to empty string to indicate no default or auto-filled
     peBull: "", // Changed to empty string
     peMid: "", // Changed to empty string
+    peCustomTerminal: "",
     peTrend3y: 0.05 // 5% annual expansion
   });
   const [manualPE, setManualPE] = useState("");
@@ -89,6 +92,8 @@ export default function Projection() {
     bull: false
   });
   const [currentBand, setCurrentBand] = useState({ bear: null, mid: null, bull: null });
+  const [selectedMetricId, setSelectedMetricId] = useState(null);
+  const [assumptionSaveStatus, setAssumptionSaveStatus] = useState("");
 
   const PE_now = useMemo(() => {
     if (manualPE === "" || manualPE === null || manualPE === undefined) return null;
@@ -137,6 +142,45 @@ export default function Projection() {
     } catch (error) {
       console.error("Error loading tickers:", error);
     }
+  };
+
+  const round2 = (value) => {
+    if (typeof value !== "number" || !isFinite(value)) return value;
+    return Number(value.toFixed(2));
+  };
+
+  // Keep growthRate canonical in decimal form (0.10 = 10%).
+  const normalizeGrowthRateDecimal = (value) => {
+    if (typeof value !== "number" || !isFinite(value) || value <= 0) return null;
+    return value > 1 ? value / 100 : value;
+  };
+
+  const loadGrowthAssumptions = () => {
+    try {
+      const raw = localStorage.getItem(EPS_GROWTH_ASSUMPTIONS_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  };
+
+  const getSavedGrowthAssumption = (symbol) => {
+    if (!symbol) return null;
+    const key = normalizeSymbol(symbol);
+    const all = loadGrowthAssumptions();
+    const value = all[key];
+    const normalized = normalizeGrowthRateDecimal(value);
+    return normalized ?? null;
+  };
+
+  const saveGrowthAssumptionLocal = (symbol, growthRate) => {
+    const key = normalizeSymbol(symbol);
+    if (!key) return;
+    const all = loadGrowthAssumptions();
+    all[key] = growthRate;
+    localStorage.setItem(EPS_GROWTH_ASSUMPTIONS_KEY, JSON.stringify(all));
   };
 
   const getLatestMetricForSymbol = async (symbol) => {
@@ -266,6 +310,7 @@ export default function Projection() {
     setSelectedTickerSymbol(symbol);
     setHasEditedPE(false); // Reset edit flag for current PE
     setPeWarning(""); // Clear warnings for current PE
+    setAssumptionSaveStatus("");
     
     // Reset P/E band edit flags and sources
     setPeBandEdited({ bear: false, mid: false, bull: false });
@@ -281,27 +326,42 @@ export default function Projection() {
       }));
       setCurrentBand({ bear: null, mid: null, bull: null });
       setManualPE("");
+      setSelectedMetricId(null);
+      setAssumptionSaveStatus("");
       return;
     }
 
     try {
       const metric = await getLatestMetricForSymbol(symbol);
+      const savedGrowthRate = getSavedGrowthAssumption(symbol);
       if (metric) {
-        const nextPrice = metric.price_current && metric.price_current > 0
-          ? metric.price_current
+        setSelectedMetricId(metric.id || null);
+        const metricGrowthRate = normalizeGrowthRateDecimal(metric.proj_growth_rate);
+        const nextGrowthRate = savedGrowthRate ?? metricGrowthRate ?? inputs.growthRate;
+        const metricPrice = parseFloat(metric.price_current);
+        const metricEPS = parseFloat(metric.eps_ttm);
+        const nextPrice = isFinite(metricPrice) && metricPrice > 0
+          ? round2(metricPrice)
           : inputs.priceToday;
-        const nextEPS = metric.eps_ttm && metric.eps_ttm > 0
-          ? metric.eps_ttm
+        const nextEPS = isFinite(metricEPS) && metricEPS > 0
+          ? round2(metricEPS)
           : inputs.EPS0;
 
         setInputs(prev => ({
           ...prev,
           priceToday: nextPrice,
           EPS0: nextEPS,
+          growthRate: nextGrowthRate,
         }));
+      } else {
+        setSelectedMetricId(null);
+        if (savedGrowthRate != null) {
+          setInputs((prev) => ({ ...prev, growthRate: savedGrowthRate }));
+        }
       }
     } catch (error) {
       console.error("Error fetching metrics for ticker:", error);
+      setSelectedMetricId(null);
     }
 
     // Prefill P/E after ticker change
@@ -309,9 +369,38 @@ export default function Projection() {
     await prefillPEBand(symbol);
   };
 
+  const handleTwoDecimalBlur = (field) => {
+    setInputs((prev) => {
+      const numValue = parseFloat(prev[field]);
+      if (!isFinite(numValue)) return prev;
+      return { ...prev, [field]: round2(numValue) };
+    });
+  };
+
   const handleInputChange = (field, value) => {
     const numValue = parseFloat(value);
     setInputs(prev => ({ ...prev, [field]: isNaN(numValue) ? value : numValue })); // Allow empty string for number inputs
+  };
+
+  const handleSaveGrowthAssumption = async () => {
+    if (!selectedTickerSymbol) return;
+    const growthRate = parseFloat(inputs.growthRate);
+    if (!isFinite(growthRate) || growthRate <= 0) {
+      setAssumptionSaveStatus("Invalid EPS growth rate");
+      return;
+    }
+
+    saveGrowthAssumptionLocal(selectedTickerSymbol, growthRate);
+    let dbSaved = false;
+    if (selectedMetricId) {
+      try {
+        await Metrics.update(selectedMetricId, { proj_growth_rate: growthRate });
+        dbSaved = true;
+      } catch (error) {
+        console.warn("Could not persist EPS growth assumption to DB:", error);
+      }
+    }
+    setAssumptionSaveStatus(dbSaved ? "Saved for this stock (DB + local)." : "Saved locally for this stock.");
   };
 
   const handlePEBandChange = (field, value) => {
@@ -344,6 +433,10 @@ export default function Projection() {
     }
   };
 
+  const handleCustomTerminalPEReset = () => {
+    setInputs((prev) => ({ ...prev, peCustomTerminal: "" }));
+  };
+
   const calculateProjection = () => {
     if (inputs.EPS0 <= 0 || !PE_now || bearBullWarning) { // Also disable if P/E band warning exists
       setResults(null);
@@ -363,10 +456,14 @@ export default function Projection() {
     let finalBearPE = Math.min(bearPE, midPE, bullPE);
     let finalBullPE = Math.max(bearPE, midPE, bullPE);
     let finalMidPE = midPE;
+    const customTerminalPE = parseFloat(inputs.peCustomTerminal);
 
     // Adjust mid if it's outside the final bear/bull range
     if (finalMidPE < finalBearPE) finalMidPE = finalBearPE;
     if (finalMidPE > finalBullPE) finalMidPE = finalBullPE;
+    const finalCustomTerminalPE = Number.isFinite(customTerminalPE) && customTerminalPE > 0
+      ? customTerminalPE
+      : finalMidPE;
     
     // Calculate yearly evolution data using buildPaths utility with manual PE_now
     const pathData = buildPaths({
@@ -378,7 +475,7 @@ export default function Projection() {
       PE_mid: finalMidPE,
       PE_bull: finalBullPE,
       PE_trendPct: peTrend3y * 100,
-      PE_custom: finalMidPE, // 'custom' scenario often defaults to mid or constant
+      PE_custom: finalCustomTerminalPE,
       targetCAGR: targetCAGR * 100,
       PE_now: PE_now,
       band: currentBand, // Pass the original metric band data
@@ -393,7 +490,9 @@ export default function Projection() {
     const exitPE = pathData.pePaths[scenarioKey][pathData.pePaths[scenarioKey].length - 1];
 
     // Calculate margin of safety
-    const marginOfSafety = (priceToday - terminalData.reqEntry) / terminalData.reqEntry;
+    const marginOfSafety = terminalData.reqEntry && terminalData.reqEntry > 0
+      ? (terminalData.reqEntry - priceToday) / terminalData.reqEntry
+      : null;
 
     setResults({
       terminalEPS,
@@ -535,6 +634,7 @@ export default function Projection() {
                     step="0.01"
                     value={inputs.priceToday}
                     onChange={(e) => handleInputChange("priceToday", e.target.value)}
+                    onBlur={() => handleTwoDecimalBlur("priceToday")}
                   />
                 </div>
                 <div>
@@ -544,16 +644,33 @@ export default function Projection() {
                     step="0.01"
                     value={inputs.EPS0}
                     onChange={(e) => handleInputChange("EPS0", e.target.value)}
+                    onBlur={() => handleTwoDecimalBlur("EPS0")}
                   />
                 </div>
                 <div>
                   <Label>EPS Growth Rate (%)</Label>
-                  <Input
-                    type="number"
-                    step="1"
-                    value={inputs.growthRate * 100}
-                    onChange={(e) => handleInputChange("growthRate", e.target.value / 100)}
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      step="1"
+                      value={inputs.growthRate * 100}
+                      onChange={(e) => handleInputChange("growthRate", e.target.value / 100)}
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={handleSaveGrowthAssumption}
+                      disabled={!selectedTickerSymbol}
+                      className="whitespace-nowrap"
+                    >
+                      Save
+                    </Button>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Save this EPS growth assumption for the selected ticker.
+                  </p>
+                  {assumptionSaveStatus && (
+                    <p className="text-xs text-emerald-700 mt-1">{assumptionSaveStatus}</p>
+                  )}
                 </div>
                 <div>
                   <Label>Time Horizon (Years)</Label>
@@ -645,6 +762,32 @@ export default function Projection() {
                     onChange={(e) => handleInputChange("peTrend3y", e.target.value / 100)}
                   />
                 </div>
+              </div>
+
+              <div>
+                <Label>Custom Terminal P/E</Label>
+                <div className="flex gap-2">
+                  <Input
+                    type="number"
+                    step="0.1"
+                    min="1"
+                    max="100"
+                    value={inputs.peCustomTerminal}
+                    onChange={(e) => handleInputChange("peCustomTerminal", e.target.value)}
+                    placeholder="Optional (defaults to Mid P/E)"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={handleCustomTerminalPEReset}
+                    className="shrink-0"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Used by Custom scenario as Year-N terminal P/E, with linear glide from Current P/E at Year-0.
+                </p>
               </div>
               
               <div className="grid grid-cols-3 gap-4">
@@ -865,10 +1008,7 @@ export default function Projection() {
                           tickFormatter={(value) => `$${value.toFixed(0)}`}
                         />
                         <Tooltip 
-                          formatter={(value, name) => [
-                            formatCurrency(value), 
-                            name === 'projected' ? 'Projected Price' : 'Target Price'
-                          ]}
+                          formatter={(value, name) => [formatCurrency(value), name]}
                           labelFormatter={(label) => `Year ${label}`}
                           contentStyle={{
                             backgroundColor: '#f8fafc',
@@ -882,7 +1022,7 @@ export default function Projection() {
                           dataKey="projected" 
                           stroke="#0f172a" 
                           strokeWidth={3}
-                          name="Projected Path"
+                          name="Projected Price"
                           dot={{ fill: '#0f172a', r: 4 }}
                         />
                         <Line 
@@ -891,7 +1031,7 @@ export default function Projection() {
                           stroke="#f59e0b" 
                           strokeWidth={2}
                           strokeDasharray="5 5"
-                          name="Target Path"
+                          name="Target Price"
                           dot={{ fill: '#f59e0b', r: 3 }}
                         />
                       </LineChart>

@@ -78,18 +78,21 @@ export function buildPaths(params) {
 
   const epsPath = years.map(t => EPS0 * Math.pow(g, t));
 
+  const customTerminalPE = (PE_custom != null && isFinite(PE_custom)) ? PE_custom : PE_mid;
+
   const pePaths = {
     bear:     years.map(t => PE_now + (PE_bear - PE_now) * (t / N)),
     bull:     years.map(t => PE_now + (PE_bull - PE_now) * (t / N)),
-    constant: years.map(() => PE_mid),
+    constant: years.map(() => PE_now),
     current:  years.map(t => {
       const trendPE = PE_now * Math.pow(peTrend, t);
       return band ? clampToBand(trendPE, band) : trendPE;
     }),
-    custom:   years.map(() => (PE_custom ?? PE_mid)),
+    // Custom scenario now glides from Year-0 PE to user-provided terminal PE by Year-N.
+    custom:   years.map(t => PE_now + (customTerminalPE - PE_now) * (t / N)),
   };
 
-  const pricePaths = (key) => epsPath.map((eps, i) => eps * pePaths[key][i]);
+  const pricePaths = (key) => epsPath.map((eps, i) => (i === 0 ? priceToday : eps * pePaths[key][i]));
 
   const terminal = (key) => {
     const priceN = pricePaths(key)[N];
