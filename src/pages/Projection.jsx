@@ -43,6 +43,7 @@ import {
 } from "../components/utils/projections";
 import { cleanBand, bandMid } from "../components/utils/peBand";
 import { cacheLatestMosForTicker } from "../components/projections/getMos";
+import { normalizeSymbol } from "../components/utils/normalizeSymbol";
 
 const SCENARIOS = {
   bear: "Bear Case",
@@ -138,6 +139,22 @@ export default function Projection() {
     }
   };
 
+  const getLatestMetricForSymbol = async (symbol) => {
+    const normTarget = normalizeSymbol(symbol);
+    const allMetrics = await Metrics.list();
+    const metricsData = (allMetrics || []).filter(
+      (m) => normalizeSymbol(m?.ticker_symbol) === normTarget
+    );
+    if (metricsData.length === 0) return null;
+    if (metricsData.length === 1) return metricsData[0];
+
+    return [...metricsData].sort((a, b) => {
+      const aDate = new Date(a?.as_of_date || a?.updated_date || a?.created_date || 0).getTime();
+      const bDate = new Date(b?.as_of_date || b?.updated_date || b?.created_date || 0).getTime();
+      return bDate - aDate;
+    })[0];
+  };
+
   const prefillPE = async (symbol) => {
     if (!symbol) {
       setManualPE("");
@@ -146,31 +163,22 @@ export default function Projection() {
 
     try {
       // Try to get from metrics first
-      const metricsData = await Metrics.filter({ ticker_symbol: symbol });
-      if (metricsData && metricsData.length > 0) {
-        const metric = metricsData[0];
-        if (metric.pe_ttm && metric.pe_ttm > 0) {
-          setManualPE(metric.pe_ttm.toFixed(2).toString());
+      const metric = await getLatestMetricForSymbol(symbol);
+      if (metric) {
+        const peFromMetrics =
+          (metric.current_pe && metric.current_pe > 0 ? metric.current_pe : null) ??
+          (metric.pe_ttm && metric.pe_ttm > 0 ? metric.pe_ttm : null);
+        if (peFromMetrics) {
+          setManualPE(peFromMetrics.toFixed(2).toString());
           return;
         }
       }
       
-      // Fall back to Price/EPS calculation
-      if (inputs.priceToday > 0 && inputs.EPS0 > 0) {
-        const calculatedPE = (inputs.priceToday / inputs.EPS0).toFixed(2);
-        setManualPE(calculatedPE);
-      } else {
-        setManualPE("");
-      }
+      // No trailing PE available in metrics.
+      setManualPE("");
     } catch (error) {
       console.error("Error prefilling P/E:", error);
-      // Fall back to Price/EPS calculation
-      if (inputs.priceToday > 0 && inputs.EPS0 > 0) {
-        const calculatedPE = (inputs.priceToday / inputs.EPS0).toFixed(2);
-        setManualPE(calculatedPE);
-      } else {
-        setManualPE("");
-      }
+      setManualPE("");
     }
   };
 
@@ -178,67 +186,76 @@ export default function Projection() {
     if (!symbol) {
       setCurrentBand({ bear: null, mid: null, bull: null });
       setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
-      setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" })); // Clear inputs
+      setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
       return;
     }
 
     try {
-      const metricsData = await Metrics.filter({ ticker_symbol: symbol });
-      if (metricsData && metricsData.length > 0) {
-        const metric = metricsData[0];
+      const metric = await getLatestMetricForSymbol(symbol);
+      if (metric) {
         const { low, high } = cleanBand(metric.pe_5y_low, metric.pe_5y_high, metric.pe_ttm);
-        const mid = bandMid(low, high);
-        const band = { bear: low, mid, bull: high };
+
+        // Primary:
+        // Bear = 5Y historical low
+        // Bull = highest available multiple in long history fields (proxy for max regime)
+        let bearPE = low;
+        const longRangeCandidates = [
+          high,
+          metric.pe_36m,
+          metric.pe_24m,
+          metric.pe_12m,
+          metric.pe_ttm,
+          metric.current_pe,
+        ].filter((v) => typeof v === "number" && isFinite(v) && v > 0);
+        let bullPE = longRangeCandidates.length > 0 ? Math.max(...longRangeCandidates) : null;
+
+        // Fallback: if 5Y PE band is missing, derive from pe_ttm (current PE)
+        // Bear = current PE * 0.7, Bull = current PE * 1.3 (±30% spread)
+        if ((bearPE == null || bullPE == null) && metric.pe_ttm && isFinite(metric.pe_ttm) && metric.pe_ttm > 0) {
+          const basePE = metric.pe_ttm;
+          bearPE = bearPE ?? parseFloat((basePE * 0.7).toFixed(1));
+          bullPE = bullPE ?? parseFloat((basePE * 1.3).toFixed(1));
+        }
+
+        const midPE = bandMid(bearPE, bullPE);
+        const band = { bear: bearPE, mid: midPE, bull: bullPE };
         setCurrentBand(band);
 
-        const newInputs = { ...inputs };
-        const newSources = { ...peBandSources };
-
-        // Only update fields that haven't been manually edited in this session
-        // peBear
-        if (!peBandEdited.bear) {
-          if (band.bear != null) {
-            newInputs.peBear = band.bear.toFixed(1).toString();
-            newSources.bear = "auto";
-          } else {
-            newInputs.peBear = "";
-            newSources.bear = "manual";
+        // Use functional updates so we don't overwrite freshly loaded price/EPS with stale state
+        setInputs((prev) => {
+          const next = { ...prev };
+          if (!peBandEdited.bear) {
+            next.peBear = band.bear != null ? band.bear.toFixed(1).toString() : "";
           }
-        }
-
-        // peMid
-        if (!peBandEdited.mid) {
-          if (band.mid != null) {
-            newInputs.peMid = band.mid.toFixed(1).toString();
-            newSources.mid = "auto";
-          } else {
-            newInputs.peMid = "";
-            newSources.mid = "manual";
+          if (!peBandEdited.mid) {
+            next.peMid = band.mid != null ? band.mid.toFixed(1).toString() : "";
           }
-        }
-
-        // peBull
-        if (!peBandEdited.bull) {
-          if (band.bull != null) {
-            newInputs.peBull = band.bull.toFixed(1).toString();
-            newSources.bull = "auto";
-          } else {
-            newInputs.peBull = "";
-            newSources.bull = "manual";
+          if (!peBandEdited.bull) {
+            next.peBull = band.bull != null ? band.bull.toFixed(1).toString() : "";
           }
-        }
+          return next;
+        });
 
-        setInputs(newInputs);
-        setPeBandSources(newSources);
+        setPeBandSources((prev) => {
+          const next = { ...prev };
+          if (!peBandEdited.bear) {
+            next.bear = band.bear != null ? (low != null ? "auto" : "auto:estimated") : "manual";
+          }
+          if (!peBandEdited.mid) {
+            next.mid = band.mid != null ? "auto" : "manual";
+          }
+          if (!peBandEdited.bull) {
+            next.bull = band.bull != null ? (longRangeCandidates.length > 0 ? "auto" : "auto:estimated") : "manual";
+          }
+          return next;
+        });
       } else {
-        // If no metrics data, reset to manual and clear values
         setCurrentBand({ bear: null, mid: null, bull: null });
         setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
         setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
       }
     } catch (error) {
       console.error("Error fetching P/E band:", error);
-      // Fallback: If error, reset to manual and clear values
       setCurrentBand({ bear: null, mid: null, bull: null });
       setPeBandSources({ bear: "manual", mid: "manual", bull: "manual" });
       setInputs(prev => ({ ...prev, peBear: "", peMid: "", peBull: "" }));
@@ -268,33 +285,20 @@ export default function Projection() {
     }
 
     try {
-      const metricsData = await Metrics.filter({ ticker_symbol: symbol });
-      if (metricsData && metricsData.length > 0) {
-        const metric = metricsData[0];
-        const ttm = metric.pe_ttm;
-        
-        // This part needs currentPrice to calculate EPS, but currentPrice is in inputs.
-        // If we update EPS0 based on TTM and a possibly stale price, it might be inaccurate.
-        // For now, let's keep it as is, or consider updating priceToday first.
-        // It's probably safer to let manualPE (prefilled) drive the PE, and EPS0 can be manually adjusted.
-        // const price = inputs.priceToday;
-        // const newEPS = ttm && price ? price/ttm : inputs.EPS0;
-        // setInputs(prev => ({ ...prev, EPS0: newEPS }));
+      const metric = await getLatestMetricForSymbol(symbol);
+      if (metric) {
+        const nextPrice = metric.price_current && metric.price_current > 0
+          ? metric.price_current
+          : inputs.priceToday;
+        const nextEPS = metric.eps_ttm && metric.eps_ttm > 0
+          ? metric.eps_ttm
+          : inputs.EPS0;
 
-        // Only prefill EPS0 if it's currently 0 or not yet set by user
-        if (inputs.EPS0 <= 0 || !hasEditedPE) { // Using hasEditedPE as a proxy for if EPS0 has been touched by user
-          if (metric.eps_ttm && metric.eps_ttm > 0) {
-            setInputs(prev => ({ ...prev, EPS0: metric.eps_ttm }));
-          } else {
-            setInputs(prev => ({ ...prev, EPS0: 5 })); // Default fallback
-          }
-        }
-
-        // Also prefill current price, if available, and not already edited by user
-        if (metric.price_current) {
-          setInputs(prev => ({ ...prev, priceToday: metric.price_current }));
-        }
-
+        setInputs(prev => ({
+          ...prev,
+          priceToday: nextPrice,
+          EPS0: nextEPS,
+        }));
       }
     } catch (error) {
       console.error("Error fetching metrics for ticker:", error);
@@ -668,8 +672,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.bear === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.bear === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.bear !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.bear === "auto" ? "Auto (5Y low)" : peBandSources.bear === "auto:estimated" ? "Auto (est. ±PE)" : "Manual"}
                     </Badge>
                   </div>
                 </div>
@@ -685,7 +689,7 @@ export default function Projection() {
                       onChange={(e) => handlePEBandChange("mid", e.target.value)}
                       placeholder={peBandSources.mid === "manual" ? "Manual required" : ""}
                     />
-                    {peBandSources.mid === "auto" && (
+                    {peBandSources.mid !== "manual" && (
                       <Button
                         variant="outline"
                         size="icon"
@@ -697,8 +701,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.mid === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.mid === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.mid !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.mid !== "manual" ? "Auto (avg)" : "Manual"}
                     </Badge>
                   </div>
                 </div>
@@ -714,7 +718,7 @@ export default function Projection() {
                       onChange={(e) => handlePEBandChange("bull", e.target.value)}
                       placeholder={peBandSources.bull === "manual" ? "Manual required" : ""}
                     />
-                    {peBandSources.bull === "auto" && (
+                    {peBandSources.bull !== "manual" && (
                       <Button
                         variant="outline"
                         size="icon"
@@ -726,8 +730,8 @@ export default function Projection() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 mt-1">
-                    <Badge variant={peBandSources.bull === "auto" ? "default" : "outline"} className="text-xs">
-                      {peBandSources.bull === "auto" ? "Auto (5Y band)" : "Manual"}
+                    <Badge variant={peBandSources.bull !== "manual" ? "default" : "outline"} className="text-xs">
+                      {peBandSources.bull === "auto" ? "Auto (max range)" : peBandSources.bull === "auto:estimated" ? "Auto (est. ±PE)" : "Manual"}
                     </Badge>
                   </div>
                 </div>

@@ -19,6 +19,7 @@ yahoo_normalizer.py requires no changes.
 
 import logging
 import math
+from datetime import date as _date, datetime as _datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,11 @@ def _date_raw(dt: Any) -> dict | None:
     try:
         if hasattr(dt, "timestamp"):
             return {"raw": int(dt.timestamp())}
+        if isinstance(dt, _date):
+            return {"raw": int(_datetime(dt.year, dt.month, dt.day).timestamp())}
+        if isinstance(dt, str):
+            parsed = _datetime.fromisoformat(dt[:10])
+            return {"raw": int(parsed.timestamp())}
         return None
     except Exception:
         return None
@@ -337,6 +343,31 @@ async def fetch_quote_summary(ticker: str, client: Any) -> dict[str, Any]:
         "financialData": {
             "enterpriseValue": _raw(info.get("enterpriseValue")),
             "enterpriseToEbitda": _raw(info.get("enterpriseToEbitda")),
+        },
+        # Extra yfinance info fields — consumed by build_yahoo_metrics_payload
+        # to populate metrics that can be derived directly from the info dict.
+        "yf_info": {
+            "forwardEps": info.get("forwardEps"),
+            "heldPercentInsiders": info.get("heldPercentInsiders"),
+            "freeCashflow": info.get("freeCashflow"),
+            "trailingPegRatio": info.get("trailingPegRatio"),
+            "debtToEquity": info.get("debtToEquity"),
+            "totalCash": info.get("totalCash"),
+            "totalDebt": info.get("totalDebt"),
+            "totalRevenue": info.get("totalRevenue"),
+            "operatingCashflow": info.get("operatingCashflow"),
+            "ebitda": info.get("ebitda"),
+            "netIncomeToCommon": info.get("netIncomeToCommon"),
+            "returnOnAssets": info.get("returnOnAssets"),
+            "returnOnEquity": info.get("returnOnEquity"),
+            "grossMargins": info.get("grossMargins"),
+            "operatingMargins": info.get("operatingMargins"),
+            "profitMargins": info.get("profitMargins"),
+            "revenueGrowth": info.get("revenueGrowth"),
+            "earningsGrowth": info.get("earningsGrowth"),
+            "sharesOutstanding": info.get("sharesOutstanding"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
         },
         "incomeStatementHistoryQuarterly": {
             "incomeStatementHistory": q_income_list,

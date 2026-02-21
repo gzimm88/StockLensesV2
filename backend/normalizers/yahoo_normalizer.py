@@ -340,6 +340,30 @@ def normalize_annual_financials(
     return records
 
 
+def _safe_div(a: Any, b: Any) -> float | None:
+    """Return a/b, or None if either is None/zero/non-finite."""
+    try:
+        fa, fb = float(a), float(b)
+        if not (math.isfinite(fa) and math.isfinite(fb)) or fb == 0:
+            return None
+        result = fa / fb
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cagr(end: Any, start: Any, years: float) -> float | None:
+    """Compute annualised CAGR = (end/start)^(1/years) - 1, in %."""
+    try:
+        fe, fs = float(end), float(start)
+        if not (math.isfinite(fe) and math.isfinite(fs)) or fs <= 0 or fe <= 0 or years <= 0:
+            return None
+        result = (fe / fs) ** (1.0 / years) - 1.0
+        return result * 100 if math.isfinite(result) else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def build_yahoo_metrics_payload(
     ticker: str, source_q: dict[str, Any], merged_quarters: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -349,14 +373,24 @@ def build_yahoo_metrics_payload(
 
     FCF = cfo_ttm - abs(capex_ttm)   (not cfo + capex)
     EV/EBITDA: prefer enterprise_value/ebitda_ttm, fallback to enterpriseToEbitda.
+    Also computes derived metrics (ROIC, FCF Margin, CFO/NI, FCF/EBIT,
+    interest coverage, buyback yield, SBC/Sales, share-count CAGR,
+    EPS CAGR 3Y/5Y, Revenue CAGR 3Y/5Y, FCF Yield, insider ownership, PEG)
+    using data from the yf_info dict and annual financial statements.
     """
     as_of = _today()
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def _sum4(key: str) -> float | None:
         vals = [q.get(key) for q in merged_quarters[:4]]
         nums = [v for v in vals if isinstance(v, (int, float)) and math.isfinite(v)]
         return sum(nums) if len(nums) == 4 else None
 
+    # ------------------------------------------------------------------
+    # TTM flow aggregates (from merged quarterly financials)
+    # ------------------------------------------------------------------
     revenue_ttm = _sum4("revenue")
     cfo_ttm = _sum4("cfo")
     capex_ttm = _sum4("capex")
@@ -377,6 +411,9 @@ def build_yahoo_metrics_payload(
         else None
     )
 
+    # ------------------------------------------------------------------
+    # Balance sheet (latest quarter)
+    # ------------------------------------------------------------------
     latest = merged_quarters[0] if merged_quarters else {}
 
     short_d = latest.get("short_debt")
@@ -386,15 +423,19 @@ def build_yahoo_metrics_payload(
         if (short_d is not None or long_d is not None)
         else None
     )
+    equity = latest.get("equity") or latest.get("stockholder_equity")
+    cash = latest.get("cash")
+    total_assets = latest.get("total_assets")
 
+    # ------------------------------------------------------------------
+    # Quoted fields from source_q (yfinance-backed quoteSummary dict)
+    # ------------------------------------------------------------------
     price_current = _pick_num(
         source_q.get("price", {}).get("regularMarketPrice"),
         source_q.get("summaryDetail", {}).get("regularMarketPreviousClose"),
     )
     market_cap = _num_raw(source_q.get("price", {}).get("marketCap"))
     shares_out = _num_raw(source_q.get("defaultKeyStatistics", {}).get("sharesOutstanding"))
-    pe_fwd = _num_raw(source_q.get("summaryDetail", {}).get("forwardPE"))
-    pe_ttm = _num_raw(source_q.get("summaryDetail", {}).get("trailingPE"))
     beta_5y = _num_raw(source_q.get("defaultKeyStatistics", {}).get("beta"))
 
     enterprise_value = _pick_num(
@@ -405,12 +446,9 @@ def build_yahoo_metrics_payload(
         source_q.get("defaultKeyStatistics", {}).get("enterpriseToEbitda"),
         source_q.get("financialData", {}).get("enterpriseToEbitda"),
     )
-    current_pe = _pick_num(
-        source_q.get("summaryDetail", {}).get("trailingPE"),
-        source_q.get("defaultKeyStatistics", {}).get("trailingPE"),
-    )
-
+    # ------------------------------------------------------------------
     # EV/EBITDA: compute from EV and EBITDA_TTM first, fallback to direct field
+    # ------------------------------------------------------------------
     ev_ebitda: float | None = None
     if enterprise_value is not None and ebitda_ttm and ebitda_ttm != 0:
         ratio = enterprise_value / ebitda_ttm
@@ -419,31 +457,235 @@ def build_yahoo_metrics_payload(
     elif enterprise_to_ebitda is not None:
         ev_ebitda = enterprise_to_ebitda
 
+    # ------------------------------------------------------------------
+    # Extra yfinance info fields (populated in yahoo_client.py)
+    # ------------------------------------------------------------------
+    yf = source_q.get("yf_info", {})
+
+    def _yf(key: str) -> float | None:
+        v = yf.get(key)
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    # Prefer TTM values from merged quarters; fall back to yfinance aggregates
+    _rev = revenue_ttm or _yf("totalRevenue")
+    _cfo = cfo_ttm or _yf("operatingCashflow")
+    _ni  = net_income_ttm or _yf("netIncomeToCommon")
+    _fcf = fcf_ttm or _yf("freeCashflow")
+    _ebitda = ebitda_ttm or _yf("ebitda")
+    _cash = cash or _yf("totalCash")
+    _debt = total_debt or _yf("totalDebt")
+
+    # ------------------------------------------------------------------
+    # Derived quality / balance metrics
+    # ------------------------------------------------------------------
+
+    # ROIC = NOPAT / Invested Capital  (NOPAT = EBIT * (1 - effective_tax_rate))
+    # Fallback: use (NI + interest_expense) / (debt + equity) if EBIT missing
+    roic_pct: float | None = None
+    if ebit_ttm is not None and equity is not None:
+        _inv_cap = (equity or 0) + (_debt or 0) - (_cash or 0)
+        if _inv_cap and _inv_cap != 0:
+            # Approximate tax rate via (NI/EBIT) if available, else default 21%
+            if _ni is not None and ebit_ttm != 0:
+                effective_tax = max(0.0, min(0.5, 1.0 - _ni / ebit_ttm))
+            else:
+                effective_tax = 0.21
+            nopat = ebit_ttm * (1.0 - effective_tax)
+            roic_pct = _safe_div(nopat * 100, _inv_cap)
+
+    # FCF Margin % = FCF / Revenue * 100
+    fcf_margin_pct = _safe_div((_fcf or 0) * 100, _rev) if _fcf is not None and _rev else None
+
+    # CFO/NI
+    cfo_to_ni = _safe_div(_cfo, _ni) if _cfo is not None and _ni else None
+
+    # FCF/EBIT
+    fcf_to_ebit = _safe_div(_fcf, ebit_ttm) if _fcf is not None and ebit_ttm else None
+
+    # Accruals Ratio = (NI - CFO) / avg(Total Assets)
+    # Use latest quarter total_assets for both if we only have one
+    accruals_ratio: float | None = None
+    if _ni is not None and _cfo is not None and total_assets:
+        accruals_ratio = _safe_div(_ni - _cfo, total_assets)
+
+    # Interest Coverage = EBIT / |Interest Expense|
+    interest_coverage_x: float | None = None
+    if ebit_ttm is not None and interest_expense_ttm and interest_expense_ttm != 0:
+        interest_coverage_x = ebit_ttm / abs(interest_expense_ttm)
+
+    # Debt / Equity — prefer yfinance (it's reported D/E ratio × 100 in some sources)
+    debt_to_equity: float | None = None
+    yf_de = _yf("debtToEquity")
+    if yf_de is not None:
+        # yfinance reports as % (e.g., 54.6 means 54.6%), normalize to ratio
+        debt_to_equity = yf_de / 100.0 if yf_de > 5 else yf_de
+    elif _debt is not None and equity and equity != 0:
+        debt_to_equity = _safe_div(_debt, equity)
+
+    # Net Debt / EBITDA
+    netdebt_to_ebitda: float | None = None
+    if _debt is not None and _cash is not None and _ebitda and _ebitda != 0:
+        net_debt = _debt - _cash
+        netdebt_to_ebitda = _safe_div(net_debt, _ebitda)
+
+    # Net Cash / Market Cap %
+    netcash_to_mktcap_pct: float | None = None
+    if _cash is not None and _debt is not None and market_cap and market_cap != 0:
+        netcash_to_mktcap_pct = _safe_div((_cash - _debt) * 100, market_cap)
+
+    # ------------------------------------------------------------------
+    # FCF Yield % = FCF / Market Cap * 100
+    # ------------------------------------------------------------------
+    fcf_yield_pct: float | None = None
+    if _fcf is not None and market_cap and market_cap != 0:
+        fcf_yield_pct = _safe_div(_fcf * 100, market_cap)
+
+    # ------------------------------------------------------------------
+    # Insider ownership %
+    # ------------------------------------------------------------------
+    insider_own_pct: float | None = None
+    yf_ins = _yf("heldPercentInsiders")
+    if yf_ins is not None:
+        insider_own_pct = yf_ins * 100  # convert 0.0058 → 0.58%
+
+    # ------------------------------------------------------------------
+    # PEG 5Y  (yfinance trailingPegRatio)
+    # ------------------------------------------------------------------
+    peg_5y = _yf("trailingPegRatio")
+    eps_forward = _yf("forwardEps")
+
+    # ------------------------------------------------------------------
+    # SBC / Sales %
+    # ------------------------------------------------------------------
+    sbc_to_sales_pct: float | None = None
+    if sbc_ttm is not None and _rev and _rev != 0:
+        sbc_to_sales_pct = _safe_div(sbc_ttm * 100, _rev)
+
+    # ------------------------------------------------------------------
+    # CAGR calculations from annual financial statements
+    # ------------------------------------------------------------------
+    # Build annual records from source_q (newest first)
+    annual_inc = source_q.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
+    annual_dates = sorted(
+        {_to_iso_date(s.get("endDate")) for s in annual_inc if _to_iso_date(s.get("endDate"))},
+        reverse=True,
+    )
+
+    # Annual EPS and Revenue series (newest first)
+    annual_eps_series: list[float] = []
+    annual_rev_series: list[float] = []
+    annual_shares_series: list[float] = []
+
+    for d in annual_dates:
+        inc_row = next((s for s in annual_inc if _to_iso_date(s.get("endDate")) == d), {})
+        eps_v = _num_raw(inc_row.get("dilutedEps"))
+        rev_v = _num_raw(inc_row.get("totalRevenue"))
+        sh_v  = _num_raw(inc_row.get("dilutedAverageShares"))
+        if eps_v is not None:
+            annual_eps_series.append(eps_v)
+        if rev_v is not None:
+            annual_rev_series.append(rev_v)
+        if sh_v is not None:
+            annual_shares_series.append(sh_v)
+
+    eps_cagr_3y_pct: float | None = None
+    eps_cagr_5y_pct: float | None = None
+    revenue_cagr_3y_pct: float | None = None
+    revenue_cagr_5y_pct: float | None = None
+    sharecount_change_5y_pct: float | None = None
+    buyback_yield_pct: float | None = None
+
+    # 3Y CAGR requires at least 4 data points (4 annual → 3 years of change)
+    if len(annual_eps_series) >= 4:
+        eps_cagr_3y_pct = _cagr(annual_eps_series[0], annual_eps_series[3], 3)
+    if len(annual_rev_series) >= 4:
+        revenue_cagr_3y_pct = _cagr(annual_rev_series[0], annual_rev_series[3], 3)
+
+    # 5Y CAGR: yfinance typically provides 4 annual data points (not 6),
+    # so use Finnhub-supplied epsGrowth5Y / revenueGrowth5Y if available,
+    # otherwise use whatever annual range we have.
+    # We prefer our own calculation when possible.
+    if len(annual_eps_series) >= 6:
+        eps_cagr_5y_pct = _cagr(annual_eps_series[0], annual_eps_series[5], 5)
+    if len(annual_rev_series) >= 6:
+        revenue_cagr_5y_pct = _cagr(annual_rev_series[0], annual_rev_series[5], 5)
+
+    # Share-count change (buyback/dilution) over available annual range
+    # Using yfinance annual balance sheet shares (newest-first from merged_quarters)
+    # Derive from annual financials shares_diluted if available
+    if len(annual_shares_series) >= 2:
+        n_years = len(annual_shares_series) - 1
+        # Negative = shares declining (buybacks), positive = dilution
+        sc_cagr = _cagr(annual_shares_series[0], annual_shares_series[-1], n_years)
+        if sc_cagr is not None:
+            sharecount_change_5y_pct = sc_cagr  # annualised % change (negative = buybacks)
+
+        # Buyback Yield ≈ (shares_prev_year - shares_now) / shares_prev_year * 100
+        if annual_shares_series[0] > 0 and annual_shares_series[1] > 0:
+            buyback_yield_pct = (
+                (annual_shares_series[1] - annual_shares_series[0]) / annual_shares_series[1] * 100
+            )
+
+    # ------------------------------------------------------------------
+    # Assemble payload
+    # ------------------------------------------------------------------
     payload: dict[str, Any] = {
         "ticker_symbol": ticker,
         "as_of_date": as_of,
         "data_source": "yahoo:multi_source_v1",
+        # Price / market
         "price_current": price_current,
+        "market_cap": market_cap,
+        "shares_out": shares_out,
+        "eps_forward": eps_forward,
+        # Valuation multiples
+        "ev_ebitda": ev_ebitda,
+        "fcf_yield_pct": fcf_yield_pct,
+        "peg_5y": peg_5y,
+        # TTM flow totals
         "revenue_ttm": revenue_ttm,
         "cfo_ttm": cfo_ttm,
         "capex_ttm": capex_ttm,
         "sbc_ttm": sbc_ttm,
-        "fcf_ttm": fcf_ttm,
         "ebit_ttm": ebit_ttm,
         "depreciation_ttm": depreciation_ttm,
         "ebitda_ttm": ebitda_ttm,
         "net_income_ttm": net_income_ttm,
         "interest_expense_ttm": interest_expense_ttm,
-        "cash": latest.get("cash"),
-        "total_debt": total_debt,
-        "equity": latest.get("equity") or latest.get("stockholder_equity"),
-        "total_assets": latest.get("total_assets"),
-        "market_cap": market_cap,
-        "shares_out": shares_out,
-        "pe_fwd": pe_fwd,
-        "pe_ttm": pe_ttm,
+        # Balance sheet
+        "cash": _cash,
+        "total_debt": _debt,
+        "equity": equity,
+        "total_assets": total_assets,
+        # Quality metrics
+        "roic_pct": roic_pct,
+        "fcf_margin_pct": fcf_margin_pct,
+        "cfo_to_ni": cfo_to_ni,
+        "fcf_to_ebit": fcf_to_ebit,
+        "accruals_ratio": accruals_ratio,
+        # Capital allocation
+        "buyback_yield_pct": buyback_yield_pct,
+        "debt_to_equity": debt_to_equity,
+        "netdebt_to_ebitda": netdebt_to_ebitda,
+        "interest_coverage_x": interest_coverage_x,
+        # Risk / leverage
         "beta_5y": beta_5y,
-        "ev_ebitda": ev_ebitda,
-        "current_pe": current_pe,
+        "netcash_to_mktcap_pct": netcash_to_mktcap_pct,
+        # Growth
+        "eps_cagr_3y_pct": eps_cagr_3y_pct,
+        "eps_cagr_5y_pct": eps_cagr_5y_pct,
+        "revenue_cagr_3y_pct": revenue_cagr_3y_pct,
+        "revenue_cagr_5y_pct": revenue_cagr_5y_pct,
+        # Dilution
+        "sharecount_change_5y_pct": sharecount_change_5y_pct,
+        "sbc_to_sales_pct": sbc_to_sales_pct,
+        # Moat / ownership
+        "insider_own_pct": insider_own_pct,
     }
     return payload

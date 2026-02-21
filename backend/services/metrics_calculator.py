@@ -497,8 +497,10 @@ def compute_price_metrics(
                 if sh_avg > 0:
                     eps = sum(ni_vals) / sh_avg
                     if eps > 0:
-                        key = window[3]["period_end"][:7]
-                        monthly_eps[key] = eps
+                        period_end = window[3].get("period_end")
+                        period_d = _parse_date(period_end)
+                        if period_d is not None:
+                            monthly_eps[period_d.strftime("%Y-%m")] = eps
 
     # Build PE series using monthly prices and EPS TTM
     pe_series = []
@@ -546,9 +548,11 @@ def _month_end_series(
     from collections import defaultdict
     by_month: dict[str, list[dict]] = defaultdict(list)
     for p in prices:
-        d = p.get("date", "")
-        if d:
-            by_month[d[:7]].append(p)
+        d = p.get("date")
+        d_parsed = _parse_date(d)
+        month_key = d_parsed.strftime("%Y-%m") if d_parsed else (str(d)[:7] if d else None)
+        if month_key:
+            by_month[month_key].append(p)
 
     result = []
     for month_key in sorted(by_month.keys(), reverse=True)[:max_months]:
@@ -608,6 +612,47 @@ def run_deterministic_pipeline(
     shares_out = BALANCE.get("shares_outstanding")
     market_cap = (price_now * shares_out) if _is_num(price_now) and _is_num(shares_out) else None
 
+    # Growth metrics are still used elsewhere (PEG, projection hints, etc.)
+    growth_metrics_seed = compute_growth_metrics(quarterly, annual)
+    eps_cagr_5y = growth_metrics_seed.get("eps_cagr_5y_pct")
+    if not _is_num(eps_cagr_5y) and existing_metrics:
+        eps_cagr_5y = existing_metrics.get("eps_cagr_5y_pct")
+
+    # EPS trace for auditability
+    logger.info(
+        "[EPS_TRACE] %s eps_ttm_fields=financials_history.net_income(4q_sum)/financials_history.shares_diluted(4q_avg) eps_ttm=%s",
+        ticker,
+        eps_ttm,
+    )
+
+    # Forward EPS policy:
+    # consensus next-12-month EPS only (from quote endpoint ingest into metrics.eps_forward)
+    eps_forward_raw = (existing_metrics or {}).get("eps_forward") if isinstance(existing_metrics, dict) else None
+    eps_forward = eps_forward_raw if _is_num(eps_forward_raw) and eps_forward_raw > 0 else None
+
+    logger.info(
+        "[EPS_TRACE] %s eps_forward_field=metrics.eps_forward(consensus_ntm_quote) eps_forward_raw=%s",
+        ticker,
+        eps_forward_raw,
+    )
+
+    # Validation guard: forward EPS should not be wildly above TTM EPS.
+    if _is_num(eps_forward) and _is_num(eps_ttm) and eps_ttm > 0 and eps_forward > 3 * eps_ttm:
+        logger.warning(
+            "[EPS_TRACE] %s invalid eps_forward=%s (>3x eps_ttm=%s). Dropping eps_forward for pe_fwd computation.",
+            ticker,
+            eps_forward,
+            eps_ttm,
+        )
+        eps_forward = None
+
+    # Deterministic forward PE = current price / forward EPS (no API-provided PE)
+    pe_fwd = None
+    if _is_num(price_now) and _is_num(eps_forward) and eps_forward > 0:
+        pe_fwd_calc = price_now / eps_forward
+        if _is_num(pe_fwd_calc):
+            pe_fwd = pe_fwd_calc
+
     # Seed payload with TTM and BALANCE
     payload: dict[str, Any] = {
         "ticker_symbol": ticker,
@@ -624,17 +669,17 @@ def run_deterministic_pipeline(
         "revenue_ttm": TTM.get("revenue"),
         "fcf_ttm": fcf_ttm,
         "eps_ttm": eps_ttm,
+        "eps_forward": eps_forward,
         "cash": BALANCE.get("cash"),
         "total_debt": BALANCE.get("total_debt"),
         "equity": BALANCE.get("stockholder_equity"),
         "total_assets": BALANCE.get("total_assets"),
         "shares_out": shares_out,
         "market_cap": market_cap,
+        "pe_fwd": pe_fwd,
     }
 
     # 1. Price metrics
-    growth_metrics_seed = compute_growth_metrics(quarterly, annual)
-    eps_cagr_5y = growth_metrics_seed.get("eps_cagr_5y_pct")
     price_m = compute_price_metrics(ticker, prices, quarterly, market_cap, eps_cagr_5y)
     payload.update(price_m)
 
@@ -666,5 +711,14 @@ def run_deterministic_pipeline(
 
     # Sector PE/EV medians (from Extract3 sector_medians config)
     # These are read-only lookups; returned as-is for the orchestrator to fill in.
+
+    if ticker.upper() in {"MSFT", "NFLX"}:
+        logger.info(
+            "[%s][PE_FWD] price_current=%s eps_forward=%s pe_fwd=%s formula=price_current/eps_forward",
+            ticker.upper(),
+            price_now,
+            eps_forward,
+            pe_fwd,
+        )
 
     return payload
