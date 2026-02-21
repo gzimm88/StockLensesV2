@@ -100,6 +100,8 @@ class Metrics(Base):
     total_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
     shares_out: Mapped[float | None] = mapped_column(Float, nullable=True)
     interest_expense_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    depreciation_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sbc_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     updated_date: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)

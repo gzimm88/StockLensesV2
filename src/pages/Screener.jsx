@@ -7,22 +7,34 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { 
-  Table, 
-  TableBody, 
-  TableCell, 
-  TableHead, 
-  TableHeader, 
-  TableRow 
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow
 } from "@/components/ui/table";
-import { 
-  Download, 
-  Search, 
-  TrendingUp, 
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Download,
+  Search,
+  TrendingUp,
   ArrowUpDown,
   Filter,
   Upload,
-  Bug
+  Bug,
+  Plus,
+  CheckCircle2,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "@/utils";
@@ -183,6 +195,194 @@ const StockDetailDrawer = ({ ticker, metrics }) => {
         ))}
       </div>
     </SheetContent>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// AddStockModal – triggers the full Yahoo + Finnhub onboarding pipeline
+// ---------------------------------------------------------------------------
+const BACKEND = "http://localhost:8000";
+
+const AddStockModal = ({ onAdded }) => {
+  const [open, setOpen] = useState(false);
+  const [symbol, setSymbol] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | loading | ok | error
+  const [result, setResult] = useState(null);    // OnboardResponse from backend
+  const [error, setError] = useState("");
+
+  const handleOpen = () => {
+    setOpen(true);
+    setSymbol("");
+    setStatus("idle");
+    setResult(null);
+    setError("");
+  };
+
+  const handleSubmit = async () => {
+    const ticker = symbol.trim().toUpperCase();
+    if (!ticker) return;
+    setStatus("loading");
+    setResult(null);
+    setError("");
+    try {
+      const res = await fetch(`${BACKEND}/onboard/${encodeURIComponent(ticker)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: false }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus("error");
+        setError(data?.detail ?? `HTTP ${res.status}`);
+      } else {
+        setStatus("ok");
+        setResult(data);
+      }
+    } catch (err) {
+      setStatus("error");
+      setError(err.message);
+    }
+  };
+
+  const handleDone = () => {
+    setOpen(false);
+    if (status === "ok") onAdded();
+  };
+
+  const stepBadge = (ok) =>
+    ok ? (
+      <CheckCircle2 className="w-4 h-4 text-green-500 inline mr-1" />
+    ) : (
+      <XCircle className="w-4 h-4 text-red-400 inline mr-1" />
+    );
+
+  return (
+    <>
+      <Button className="gap-2 bg-slate-900 hover:bg-slate-800" onClick={handleOpen}>
+        <Plus className="w-4 h-4" />
+        Add Stock
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add a Stock</DialogTitle>
+            <DialogDescription>
+              Enter a ticker symbol to run the full onboarding pipeline
+              (Yahoo 5Y prices · Finnhub fundamentals · computed metrics).
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Symbol input */}
+          {status === "idle" && (
+            <div className="space-y-4 py-2">
+              <Input
+                placeholder="e.g. AAPL"
+                value={symbol}
+                onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+                autoFocus
+              />
+              <p className="text-xs text-slate-500">
+                If the ticker is already in the DB, the pipeline is skipped and
+                the existing data is used immediately.
+              </p>
+            </div>
+          )}
+
+          {/* Loading */}
+          {status === "loading" && (
+            <div className="flex flex-col items-center gap-3 py-6">
+              <Loader2 className="w-8 h-8 animate-spin text-slate-700" />
+              <p className="text-sm text-slate-600">
+                Running onboarding pipeline for <strong>{symbol}</strong>…
+              </p>
+              <p className="text-xs text-slate-400">
+                This fetches 5 years of prices, fundamentals from Yahoo &amp;
+                Finnhub, then computes all metrics. May take 10–30 s.
+              </p>
+            </div>
+          )}
+
+          {/* Success */}
+          {status === "ok" && result && (
+            <div className="space-y-3 py-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-green-500" />
+                <span className="font-medium">
+                  {result.status === "skipped"
+                    ? `${result.ticker} was already onboarded — loaded from DB.`
+                    : `${result.ticker} onboarded successfully.`}
+                </span>
+              </div>
+              {result.steps && Object.keys(result.steps).length > 0 && (
+                <div className="bg-slate-50 rounded p-3 text-xs space-y-1">
+                  {Object.entries(result.steps).map(([step, ok]) => (
+                    <div key={step}>
+                      {stepBadge(ok)}
+                      <span className="text-slate-700">{step}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {result.errors?.length > 0 && (
+                <div className="bg-red-50 rounded p-3 text-xs text-red-700 space-y-1">
+                  {result.errors.map((e, i) => (
+                    <div key={i}>{e}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Error */}
+          {status === "error" && (
+            <div className="flex flex-col items-center gap-3 py-4">
+              <XCircle className="w-8 h-8 text-red-400" />
+              <p className="text-sm text-red-600">{error}</p>
+            </div>
+          )}
+
+          <DialogFooter>
+            {status === "idle" && (
+              <>
+                <Button variant="outline" onClick={() => setOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={!symbol.trim()}
+                  onClick={handleSubmit}
+                  className="bg-slate-900 hover:bg-slate-800"
+                >
+                  Run Pipeline
+                </Button>
+              </>
+            )}
+            {status === "loading" && (
+              <Button variant="outline" disabled>
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                Running…
+              </Button>
+            )}
+            {(status === "ok" || status === "error") && (
+              <>
+                {status === "error" && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setStatus("idle")}
+                  >
+                    Try Again
+                  </Button>
+                )}
+                <Button onClick={handleDone} className="bg-slate-900 hover:bg-slate-800">
+                  {status === "ok" ? "Done" : "Close"}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 };
 
@@ -507,12 +707,7 @@ export default function Screener() {
               <Download className="w-4 h-4" />
               Export CSV
             </Button>
-            <Link to={createPageUrl("StockDetail")}>
-              <Button className="gap-2 bg-slate-900 hover:bg-slate-800">
-                <TrendingUp className="w-4 h-4" />
-                Add Stock
-              </Button>
-            </Link>
+            <AddStockModal onAdded={loadData} />
           </div>
         </div>
 
