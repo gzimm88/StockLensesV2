@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -202,3 +202,52 @@ class LensPreset(Base):
     created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
     is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class ScoreSnapshot(Base):
+    """
+    Deterministic score snapshot for a (ticker, lens, as_of_date) triple.
+    Invariant: same metrics + same lens + same SCORE_VERSION → same snapshot_hash.
+
+    Recommendation = score-only (no MOS or confidence gating).
+    MOS is a display signal only (mos_signal: +/0/-).
+    Confidence is an audit signal only (confidence_grade: A/B/C/D).
+    """
+    __tablename__ = "score_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    lens_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    lens_name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Versioning
+    score_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    data_version: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Scores
+    final_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    category_scores: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+
+    # Recommendation (score-only — no MOS or confidence gating)
+    recommendation: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Confidence (audit/display only — does NOT gate recommendation)
+    confidence_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_grade: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # MOS (display signal only — does NOT gate recommendation)
+    mos_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mos_signal: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Explainability
+    top_positive_contributors: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    top_negative_contributors: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    missing_critical_fields: Mapped[str | None] = mapped_column(Text, nullable=True)    # JSON
+    resolution_warnings: Mapped[str | None] = mapped_column(Text, nullable=True)        # JSON
+
+    # Determinism
+    snapshot_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    # Timestamps
+    as_of_date: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    created_at: Mapped[str | None] = mapped_column(String, nullable=True)

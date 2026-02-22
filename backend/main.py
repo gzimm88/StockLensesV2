@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from backend.database import Base, engine, get_db
-from backend.models import FinancialsHistory, LensPreset, Metrics, PricesHistory, Ticker
+from backend.models import FinancialsHistory, LensPreset, Metrics, PricesHistory, ScoreSnapshot, Ticker
 from backend.orchestrator.onboarding_orchestrator import (
     OnboardingResult,
     run_full_onboard,
@@ -133,6 +133,97 @@ def list_prices(limit: int = 100, db: Session = Depends(get_db)):
 def list_lens_presets(limit: int = 100, db: Session = Depends(get_db)):
     rows = db.scalars(select(LensPreset).limit(limit)).all()
     return rows_to_dict(rows)
+
+
+# ---------------------------------------------------------------------------
+# Score Snapshot endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def _deserialise_snapshot(row) -> dict:
+    """Convert a ScoreSnapshot ORM row to a JSON-serialisable dict."""
+    d = {col.name: getattr(row, col.name) for col in row.__table__.columns}
+    _JSON_COLS = {
+        "category_scores", "top_positive_contributors",
+        "top_negative_contributors", "missing_critical_fields",
+        "resolution_warnings",
+    }
+    for col in _JSON_COLS:
+        if isinstance(d.get(col), str):
+            try:
+                d[col] = _json.loads(d[col])
+            except Exception:
+                pass
+    return d
+
+
+@app.get("/snapshots/{ticker}")
+def get_snapshots_for_ticker(ticker: str, db: Session = Depends(get_db)):
+    """Return all ScoreSnapshots for a ticker (one per lens, latest as_of_date)."""
+    rows = (
+        db.query(ScoreSnapshot)
+        .filter(ScoreSnapshot.ticker_symbol == ticker.strip().upper())
+        .order_by(ScoreSnapshot.as_of_date.desc())
+        .all()
+    )
+    return [_deserialise_snapshot(r) for r in rows]
+
+
+@app.get("/snapshots/{ticker}/{lens_id}")
+def get_snapshot_for_ticker_lens(ticker: str, lens_id: str, db: Session = Depends(get_db)):
+    """Return the latest ScoreSnapshot for a (ticker, lens) pair."""
+    row = (
+        db.query(ScoreSnapshot)
+        .filter(
+            ScoreSnapshot.ticker_symbol == ticker.strip().upper(),
+            ScoreSnapshot.lens_id == lens_id,
+        )
+        .order_by(ScoreSnapshot.as_of_date.desc())
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No snapshot found for {ticker}/{lens_id}")
+    return _deserialise_snapshot(row)
+
+
+@app.post("/snapshots/{ticker}/recompute")
+def recompute_snapshots(ticker: str, db: Session = Depends(get_db)):
+    """Recompute and persist ScoreSnapshots for all lenses without re-fetching external data."""
+    from backend.services import snapshot_service
+    from backend.services.metric_resolver import check_ttm_coverage
+    from backend.repositories import financials_repo as _fr
+
+    ticker_upper = ticker.strip().upper()
+    latest_metrics = metrics_repo.get_metrics(db, ticker_upper)
+    if not latest_metrics:
+        raise HTTPException(status_code=404, detail=f"No metrics found for {ticker_upper}")
+
+    lens_presets = db.query(LensPreset).all()
+    q_rows = _fr.get_financials_for_ticker(db, ticker_upper, freq="quarterly", limit=4)
+    ttm_info = check_ttm_coverage(q_rows, ticker=ticker_upper)
+
+    results = []
+    for lp in lens_presets:
+        lens_dict = {
+            "id": lp.id, "name": lp.name,
+            "valuation": lp.valuation, "quality": lp.quality,
+            "capitalAllocation": lp.capitalAllocation, "growth": lp.growth,
+            "moat": lp.moat, "risk": lp.risk, "macro": lp.macro,
+            "narrative": lp.narrative, "dilution": lp.dilution,
+            "buyThreshold": lp.buyThreshold, "watchThreshold": lp.watchThreshold,
+        }
+        snap = snapshot_service.compute_snapshot(
+            ticker_symbol=ticker_upper,
+            lens=lens_dict,
+            metrics=latest_metrics,
+            resolution_warnings=ttm_info["warnings"],
+        )
+        snapshot_service.upsert_snapshot(db, snap)
+        results.append({"lens": lp.name, "hash": snap["snapshot_hash"], "rec": snap["recommendation"]})
+
+    return {"ticker": ticker_upper, "snapshots": results}
 
 
 # ---------------------------------------------------------------------------

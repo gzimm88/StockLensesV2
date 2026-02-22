@@ -456,6 +456,54 @@ async def run_full_onboard(
         except Exception as exc:
             result.step_failed("F:price_metrics", str(exc))
 
+        # Step G: Compute Score Snapshots for all lens presets (Phase 3)
+        result.log("[Step G] Computing ScoreSnapshots for all lens presets...")
+        try:
+            from backend.models import LensPreset
+            from backend.services import snapshot_service
+            from backend.services.metric_resolver import check_ttm_coverage
+            from backend.repositories import financials_repo as _fr
+
+            latest_metrics = metrics_repo.get_metrics(db, ticker) or {}
+            lens_presets = db.query(LensPreset).all()
+
+            # Collect TTM warnings for explainability
+            q_rows = _fr.get_financials_for_ticker(db, ticker, freq="quarterly", limit=4)
+            ttm_info = check_ttm_coverage(q_rows, ticker=ticker)
+            resolution_warnings = ttm_info["warnings"]
+
+            snapshot_count = 0
+            for lp in lens_presets:
+                lens_dict = {
+                    "id":                lp.id,
+                    "name":              lp.name,
+                    "valuation":         lp.valuation,
+                    "quality":           lp.quality,
+                    "capitalAllocation": lp.capitalAllocation,
+                    "growth":            lp.growth,
+                    "moat":              lp.moat,
+                    "risk":              lp.risk,
+                    "macro":             lp.macro,
+                    "narrative":         lp.narrative,
+                    "dilution":          lp.dilution,
+                    "buyThreshold":      lp.buyThreshold,
+                    "watchThreshold":    lp.watchThreshold,
+                }
+                snap = snapshot_service.compute_snapshot(
+                    ticker_symbol=ticker,
+                    lens=lens_dict,
+                    metrics=latest_metrics,
+                    mos_pct=None,          # MOS is computed in Projection — not available here
+                    resolution_warnings=resolution_warnings,
+                )
+                snapshot_service.upsert_snapshot(db, snap)
+                snapshot_count += 1
+
+            result.step_success("G:score_snapshots", {"snapshots_written": snapshot_count})
+            result.log(f"[Step G] {snapshot_count} ScoreSnapshot(s) persisted for {ticker}")
+        except Exception as exc:
+            result.step_failed("G:score_snapshots", str(exc))
+
         # Final debug snapshot for traceability in UI log tab
         try:
             latest = metrics_repo.get_metrics(db, ticker) or {}

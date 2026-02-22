@@ -588,7 +588,17 @@ def run_deterministic_pipeline(
       5. computeRiskMetrics
 
     Returns merged payload dict for metrics upsert.
+
+    Phase 1.1 — TTM integrity:
+      If quarterly coverage < 4, TTM flow fields (eps_ttm, pe_ttm, fcf_ttm, etc.)
+      are set to None. partial_ttm flag is set to True.
+      Do NOT backfill with projections.
     """
+    # --- Phase 1.1: TTM coverage check ---
+    from backend.services.metric_resolver import check_ttm_coverage, validate_eps_forward
+    ttm_coverage = check_ttm_coverage(quarterly, ticker=ticker)
+    partial_ttm = not ttm_coverage["sufficient"]
+
     TTM, BALANCE = build_ttm(quarterly)
 
     # Derive FCF TTM
@@ -625,10 +635,10 @@ def run_deterministic_pipeline(
         eps_ttm,
     )
 
-    # Forward EPS policy:
+    # Forward EPS policy (Phase 1.2 — metric_resolver):
     # consensus next-12-month EPS only (from quote endpoint ingest into metrics.eps_forward)
+    # Never derived from CAGR projection. Validated via metric_resolver.
     eps_forward_raw = (existing_metrics or {}).get("eps_forward") if isinstance(existing_metrics, dict) else None
-    eps_forward = eps_forward_raw if _is_num(eps_forward_raw) and eps_forward_raw > 0 else None
 
     logger.info(
         "[EPS_TRACE] %s eps_forward_field=metrics.eps_forward(consensus_ntm_quote) eps_forward_raw=%s",
@@ -636,15 +646,8 @@ def run_deterministic_pipeline(
         eps_forward_raw,
     )
 
-    # Validation guard: forward EPS should not be wildly above TTM EPS.
-    if _is_num(eps_forward) and _is_num(eps_ttm) and eps_ttm > 0 and eps_forward > 3 * eps_ttm:
-        logger.warning(
-            "[EPS_TRACE] %s invalid eps_forward=%s (>3x eps_ttm=%s). Dropping eps_forward for pe_fwd computation.",
-            ticker,
-            eps_forward,
-            eps_ttm,
-        )
-        eps_forward = None
+    # Use centralized validator from metric_resolver
+    eps_forward = validate_eps_forward(eps_forward_raw, eps_ttm, ticker=ticker)
 
     # Deterministic forward PE = current price / forward EPS (no API-provided PE)
     pe_fwd = None
@@ -658,6 +661,7 @@ def run_deterministic_pipeline(
         "ticker_symbol": ticker,
         "as_of_date": date.today().isoformat(),
         "data_source": "computed",
+        "partial_ttm": partial_ttm,          # Phase 1.1: flag insufficient TTM coverage
         "cfo_ttm": cfo,
         "capex_ttm": capex,
         "ebit_ttm": ebit,
