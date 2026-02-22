@@ -156,3 +156,54 @@ button:focus-visible {
     @apply bg-background text-foreground;
   }
 }
+
+@layer utilities {
+  .dark .bg-white {
+    background-color: rgb(2 6 23);
+  }
+  .dark .bg-slate-50 {
+    background-color: rgb(15 23 42);
+  }
+  .dark .bg-slate-100 {
+    background-color: rgb(30 41 59);
+  }
+  .dark .bg-slate-200 {
+    background-color: rgb(51 65 85);
+  }
+  .dark .border-slate-200 {
+    border-color: rgb(51 65 85);
+  }
+  .dark .text-slate-900 {
+    color: rgb(241 245 249);
+  }
+  .dark .text-slate-800 {
+    color: rgb(226 232 240);
+  }
+  .dark .text-slate-700 {
+    color: rgb(203 213 225);
+  }
+  .dark .text-slate-600 {
+    color: rgb(148 163 184);
+  }
+  .dark .text-slate-500 {
+    color: rgb(148 163 184);
+  }
+  .dark .hover\:bg-slate-50:hover {
+    background-color: rgb(15 23 42);
+  }
+  .dark .hover\:bg-slate-100:hover {
+    background-color: rgb(30 41 59);
+  }
+  .dark .bg-amber-50 {
+    background-color: rgb(69 26 3 / 0.28);
+  }
+  .dark .bg-red-50 {
+    background-color: rgb(69 10 10 / 0.35);
+  }
+  .dark .bg-emerald-50 {
+    background-color: rgb(2 44 34 / 0.4);
+  }
+  .dark .bg-blue-50 {
+    background-color: rgb(30 58 138 / 0.28);
+  }
+}
