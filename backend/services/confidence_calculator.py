@@ -81,6 +81,7 @@ LENS_REQUIRED_FIELDS: dict[str, dict[str, float]] = {
         "revenue_cagr_5y_pct": 2.0,
         "eps_cagr_3y_pct": 1.5,
         "revenue_cagr_3y_pct": 1.5,
+        "recurring_revenue_pct": 1.2,   # now part of Growth score (durability)
         "pe_fwd": 1.0,
         "peg_5y": 1.5,
         "roic_pct": 1.0,
@@ -127,6 +128,76 @@ LENS_REQUIRED_FIELDS: dict[str, dict[str, float]] = {
         "interest_coverage_x": 1.0,
         "pe_fwd": 1.0,
         "peg_5y": 0.8,
+    },
+    # ------------------------------------------------------------------
+    # Famous investor lenses
+    # ------------------------------------------------------------------
+    "Warren Buffett": {
+        # Moat is the primary lens — must be quantified
+        "moat_score_0_10": 2.5,
+        # Quality of the business (owner earnings proxy)
+        "roic_pct": 2.0,
+        "fcf_margin_pct": 1.5,
+        "fcf_to_ebit": 1.0,
+        "cfo_to_ni": 1.0,
+        "margin_stdev_5y_pct": 1.0,
+        # Capital allocation — disciplined return of capital
+        "buyback_yield_pct": 1.2,
+        "interest_coverage_x": 1.2,
+        "netdebt_to_ebitda": 1.0,
+        # Growth — sustainable earnings growth
+        "eps_cagr_5y_pct": 1.0,
+        "revenue_cagr_5y_pct": 0.8,
+        # Valuation — fair price (FCF yield is the owner-earnings check)
+        "fcf_yield_pct": 1.5,
+        "pe_fwd": 1.0,
+        "pe_ttm": 0.8,
+        "pe_5y_low": 0.8,
+        "pe_5y_high": 0.8,
+    },
+    "Benjamin Graham": {
+        # Valuation — statistical cheapness is paramount
+        "pe_fwd": 2.0,
+        "pe_ttm": 1.5,
+        "fcf_yield_pct": 2.0,
+        "ev_ebitda": 1.5,
+        "pe_5y_low": 1.2,
+        "pe_5y_high": 1.2,
+        # Risk / Balance sheet safety — the margin-of-safety backbone
+        "netdebt_to_ebitda": 2.0,
+        "interest_coverage_x": 1.5,
+        "beta_5y": 1.0,
+        "maxdrawdown_5y_pct": 1.0,
+        "netcash_to_mktcap_pct": 1.0,
+        # Quality — earnings stability and accruals (no funny accounting)
+        "margin_stdev_5y_pct": 1.5,
+        "accruals_ratio": 1.2,
+        "cfo_to_ni": 1.0,
+        "roic_pct": 1.0,
+        # Dilution — net-net discipline
+        "sharecount_change_5y_pct": 0.8,
+    },
+    "Peter Lynch": {
+        # Growth — the core GARP criterion
+        "eps_cagr_5y_pct": 2.0,
+        "revenue_cagr_5y_pct": 1.5,
+        "eps_cagr_3y_pct": 1.5,
+        "revenue_cagr_3y_pct": 1.0,
+        "recurring_revenue_pct": 1.0,   # growth durability signal
+        # Valuation — PEG is Lynch's signature metric
+        "peg_5y": 2.0,
+        "pe_fwd": 1.2,
+        "fcf_yield_pct": 1.0,
+        # Quality — earnings quality behind the growth
+        "roic_pct": 1.0,
+        "fcf_margin_pct": 0.8,
+        "cfo_to_ni": 0.8,
+        # Risk — debt check (especially for cyclicals)
+        "netdebt_to_ebitda": 1.0,
+        "interest_coverage_x": 0.8,
+        # Moat / Narrative — "invest in what you know"
+        "moat_score_0_10": 0.8,
+        "narrative_score_0_10": 1.0,
     },
 }
 

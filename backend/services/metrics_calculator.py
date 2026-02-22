@@ -528,9 +528,9 @@ def compute_price_metrics(
                 out["pe_ttm"] = pe_now
                 out["current_pe"] = pe_now
 
-    # PEG = current_pe / (eps_cagr_5y_pct / 100)
+    # PEG = current_pe / eps_cagr_5y_pct  (cagr is in pct-points, e.g. 14.5 for 14.5%)
     if _is_num(out.get("current_pe")) and _is_num(eps_cagr_5y_pct) and eps_cagr_5y_pct > 0:
-        peg = out["current_pe"] / (eps_cagr_5y_pct / 100)
+        peg = out["current_pe"] / eps_cagr_5y_pct
         if _is_num(peg):
             out["peg_5y"] = peg
 
