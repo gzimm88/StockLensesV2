@@ -362,3 +362,35 @@ class PortfolioCorrectionEvent(Base):
     delta_shares: Mapped[float] = mapped_column(Float, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CorporateAction(Base):
+    __tablename__ = "corporate_actions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    ticker: Mapped[str] = mapped_column(String, index=True)
+    action_type: Mapped[str] = mapped_column(String, index=True)
+    effective_date: Mapped[Date] = mapped_column(Date, index=True)
+    factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class LedgerSnapshot(Base):
+    __tablename__ = "ledger_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    ledger_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    as_of: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    holdings_json: Mapped[str] = mapped_column(Text, nullable=False)
+    basis_json: Mapped[str] = mapped_column(Text, nullable=False)
+    cash: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
