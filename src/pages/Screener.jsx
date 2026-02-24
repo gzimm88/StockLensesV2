@@ -60,6 +60,7 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { Slider } from "@/components/ui/slider";
+import * as SliderPrimitive from "@radix-ui/react-slider";
 import {
   Tooltip,
   TooltipContent,
@@ -71,7 +72,7 @@ import { toPoints, toNumber } from "../components/utils/num";
 import { normalizeSymbol } from "../components/utils/normalizeSymbol";
 import { getLatestMetricsBySymbol, deduplicateTickers } from "../components/utils/metricsView";
 import { computeCategoryScores, computeFinalScore } from "../components/utils/scoring";
-import { recommend } from "../components/scoring/recommend";
+import { recommend, mosSignal } from "../components/scoring/recommend";
 import { lensRec } from "../components/config/lenses";
 import { getLatestMosForTicker } from "../components/projections/getMos";
 import { cleanBand } from "../components/utils/peBand";
@@ -128,10 +129,54 @@ const ScoreTooltipContent = ({ scores, lens }) => (
     </div>
 );
 
-const StockDetailDrawer = ({ ticker, metrics }) => {
+const StockDetailDrawer = ({ ticker, metrics, onSaveSubjective }) => {
   if (!ticker || !metrics) return null;
 
   const scores = computeCategoryScores(metrics);
+  const [form, setForm] = useState({
+    moat_score_0_10: metrics.moat_score_0_10 ?? "",
+    riskdownside_score_0_10: metrics.riskdownside_score_0_10 ?? "",
+    macrofit_score_0_10: metrics.macrofit_score_0_10 ?? "",
+    narrative_score_0_10: metrics.narrative_score_0_10 ?? "",
+    founder_led_bool: !!metrics.founder_led_bool,
+  });
+  const [saveState, setSaveState] = useState({ loading: false, error: "", ok: "" });
+
+  useEffect(() => {
+    setForm({
+      moat_score_0_10: metrics.moat_score_0_10 ?? "",
+      riskdownside_score_0_10: metrics.riskdownside_score_0_10 ?? "",
+      macrofit_score_0_10: metrics.macrofit_score_0_10 ?? "",
+      narrative_score_0_10: metrics.narrative_score_0_10 ?? "",
+      founder_led_bool: !!metrics.founder_led_bool,
+    });
+    setSaveState({ loading: false, error: "", ok: "" });
+  }, [ticker?.symbol, metrics]);
+
+  const parseScore = (value, label) => {
+    if (value === "") return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) throw new Error(`${label} must be numeric.`);
+    if (n < 0 || n > 10) throw new Error(`${label} must be between 0 and 10.`);
+    return n;
+  };
+
+  const handleSave = async () => {
+    setSaveState({ loading: true, error: "", ok: "" });
+    try {
+      const payload = {
+        moat_score_0_10: parseScore(form.moat_score_0_10, "Moat score"),
+        riskdownside_score_0_10: parseScore(form.riskdownside_score_0_10, "Risk score"),
+        macrofit_score_0_10: parseScore(form.macrofit_score_0_10, "Macro fit score"),
+        narrative_score_0_10: parseScore(form.narrative_score_0_10, "Narrative score"),
+        founder_led_bool: !!form.founder_led_bool,
+      };
+      await onSaveSubjective(ticker.symbol, payload);
+      setSaveState({ loading: false, error: "", ok: "Saved subjective scores." });
+    } catch (err) {
+      setSaveState({ loading: false, error: err.message || "Failed to save.", ok: "" });
+    }
+  };
 
   const breakdownDetails = {
       Valuation: {
@@ -221,6 +266,74 @@ const StockDetailDrawer = ({ ticker, metrics }) => {
         <p className="text-sm text-slate-500">Scoring components breakdown</p>
       </SheetHeader>
       <div className="py-4 space-y-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Editable Subjective Inputs</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Moat Score (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.moat_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, moat_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Risk Score (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.riskdownside_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, riskdownside_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Macro Fit (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.macrofit_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, macrofit_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Narrative (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.narrative_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, narrative_score_0_10: e.target.value }))}
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={form.founder_led_bool}
+                onChange={(e) => setForm((prev) => ({ ...prev, founder_led_bool: e.target.checked }))}
+              />
+              Founder-led
+            </label>
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSave} disabled={saveState.loading}>
+                {saveState.loading ? "Saving..." : "Save Subjective Scores"}
+              </Button>
+              {saveState.ok && <span className="text-sm text-green-700">{saveState.ok}</span>}
+              {saveState.error && <span className="text-sm text-red-600">{saveState.error}</span>}
+            </div>
+          </CardContent>
+        </Card>
         {Object.entries(breakdownDetails).map(([name, data]) => (
             <ScoreBreakdown key={name} name={name} score={data.score} details={data.details} />
         ))}
@@ -510,6 +623,53 @@ const CSVImporter = ({ onImported }) => {
   );
 };
 
+// ---------------------------------------------------------------------------
+// ThresholdSlider — dual-handle slider that shows BUY / WATCH / AVOID zones
+// ---------------------------------------------------------------------------
+function ThresholdSlider({ buyMin, watchMin, onChange }) {
+  // Gradient positions are percentages of the 0–10 range
+  const wPct = (watchMin / 10) * 100;
+  const bPct = (buyMin  / 10) * 100;
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xs font-medium text-slate-500 whitespace-nowrap">Thresholds</span>
+      <div className="relative w-44 py-1">
+        {/* Coloured zone bar rendered behind the thumb rail */}
+        <div
+          className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 rounded-full pointer-events-none"
+          style={{
+            background: `linear-gradient(to right,
+              #fca5a5 0%, #fca5a5 ${wPct}%,
+              #fde68a ${wPct}%, #fde68a ${bPct}%,
+              #86efac ${bPct}%, #86efac 100%)`
+          }}
+        />
+        <SliderPrimitive.Root
+          className="relative flex w-full touch-none select-none items-center"
+          min={0} max={10} step={0.1}
+          minStepsBetweenThumbs={1}
+          value={[watchMin, buyMin]}
+          onValueChange={([w, b]) => onChange(w, b)}
+        >
+          <SliderPrimitive.Track className="relative h-2 w-full grow rounded-full bg-transparent">
+            {/* Range hidden — zone bar provides all visual feedback */}
+            <SliderPrimitive.Range className="absolute h-full bg-transparent" />
+          </SliderPrimitive.Track>
+          {/* Watch threshold thumb — amber ring */}
+          <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border-2 border-amber-500 bg-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 transition-shadow cursor-grab active:cursor-grabbing" />
+          {/* Buy threshold thumb — green ring */}
+          <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border-2 border-green-600 bg-white shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-400 transition-shadow cursor-grab active:cursor-grabbing" />
+        </SliderPrimitive.Root>
+      </div>
+      <div className="text-xs whitespace-nowrap tabular-nums">
+        <span className="text-green-700 font-semibold">Buy ≥{buyMin.toFixed(1)}</span>
+        <span className="text-slate-300 mx-1">·</span>
+        <span className="text-amber-600 font-semibold">Watch ≥{watchMin.toFixed(1)}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Screener() {
   const [tickers, setTickers] = useState([]);
   const [metrics, setMetrics] = useState([]);
@@ -524,6 +684,10 @@ export default function Screener() {
   const [traceDrawerData, setTraceDrawerData] = useState(null);
   const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [minScoreFilter, setMinScoreFilter] = useState(0);
+
+  const [buyMin, setBuyMin]     = useState(6.5);
+  const [watchMin, setWatchMin] = useState(4.5);
+
   const [isBulkUpdating, setIsBulkUpdating] = useState(false);
   const [bulkUpdateStatus, setBulkUpdateStatus] = useState(null);
   const [activeTab, setActiveTab] = useState("results");
@@ -535,6 +699,15 @@ export default function Screener() {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Reset thresholds to lens defaults whenever the active lens changes
+  useEffect(() => {
+    if (selectedLens) {
+      const cfg = lensRec[selectedLens.name] || lensRec["Conservative"];
+      setBuyMin(cfg.buy ?? 6.5);
+      setWatchMin(cfg.watch ?? 4.5);
+    }
+  }, [selectedLens]);
   
   const loadData = async () => {
     setIsLoading(true);
@@ -577,7 +750,7 @@ export default function Screener() {
       
       const mos = getLatestMosForTicker(ticker.symbol);
       const lensConfig = lensRec[selectedLens.name] || lensRec["Conservative"];
-      
+
       const confidence = calculateConfidencePct(metric);
       const { rec, mosStatus, confStatus } = recommend(finalScore, mos, {
         buy: lensConfig.buy,
@@ -587,14 +760,19 @@ export default function Screener() {
         confidence,
       });
       
+
       return {
         ticker,
         metrics: metric,
         scores,
         finalScore,
         recommendation: rec,
+
+        mosSig: mosSignal(mos),
+
         mosStatus: mosStatus,
         confStatus,
+
         confidence,
         mos,
       };
@@ -639,7 +817,7 @@ export default function Screener() {
       
       return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
     });
-  }, [tickers, metrics, selectedLens, searchTerm, sortField, sortDirection, recommendationFilter, minScoreFilter]);
+  }, [tickers, metrics, selectedLens, searchTerm, sortField, sortDirection, recommendationFilter, minScoreFilter, buyMin, watchMin]);
 
   const handleSort = (field) => {
     if (sortField === field) {
@@ -657,7 +835,11 @@ export default function Screener() {
     
     const headers = [
       'symbol', 'name', 'lens', 'recommendation', 'finalScore',
+
+      'buy_threshold', 'watch_threshold', 'mos_signal', 'mos_value', 'confidence_value', 'pe_low', 'pe_high', 'pe_ttm',
+
       'buy_threshold', 'watch_threshold', 'mos_threshold', 'conf_threshold', 'mos_value', 'confidence_value', 'pe_low', 'pe_high', 'pe_ttm',
+
       'pe_band_source',
       ...Object.keys(enrichedData[0].scores),
       'exportedAt',
@@ -675,8 +857,12 @@ export default function Screener() {
         item.finalScore.toFixed(2),
         lensConfig.buy || 6.5,
         lensConfig.watch || 4.5,
+
+        item.mosSig ?? '',
+
         lensConfig.mos || 0,
         lensConfig.conf || 0,
+
         item.mos != null ? (item.mos * 100).toFixed(1) + '%' : 'N/A',
         `${item.confidence.toFixed(1)}%`,
         low ?? '',
@@ -704,10 +890,10 @@ export default function Screener() {
     URL.revokeObjectURL(url);
   };
 
-  const getScoreColor = (score) => {
-    if (score >= 8) return "text-green-700 bg-green-50";
-    if (score >= 6) return "text-amber-700 bg-amber-50";
-    if (score >= 4) return "text-orange-700 bg-orange-50";
+  const getScoreColor = (score, buyMin = 6.5, watchMin = 4.5) => {
+    if (score >= buyMin)   return "text-green-700 bg-green-50";
+    if (score >= watchMin) return "text-amber-700 bg-amber-50";
+    if (score >= 3)        return "text-orange-700 bg-orange-50";
     return "text-red-700 bg-red-50";
   };
   
@@ -729,6 +915,41 @@ export default function Screener() {
     setTraceDrawerData({ ticker: item.ticker, metrics: item.metrics, lens: selectedLens });
     setTraceDrawerOpen(true);
   };
+
+
+  const handleSaveSubjectiveMetrics = async (symbol, payload) => {
+    const res = await fetch(`/api/metrics/subjective/${encodeURIComponent(normalizeSymbol(symbol))}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.detail ?? `HTTP ${res.status}`);
+    }
+
+    setMetrics((prev) =>
+      prev.map((m) => {
+        if (normalizeSymbol(m?.ticker_symbol) !== normalizeSymbol(symbol)) {
+          return m;
+        }
+        return { ...m, ...data?.data };
+      })
+    );
+    setDetailTicker((prev) => {
+      if (!prev?.ticker?.symbol || normalizeSymbol(prev.ticker.symbol) !== normalizeSymbol(symbol)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        metrics: {
+          ...prev.metrics,
+          ...data?.data,
+        },
+      };
+    });
+  };
+
 
   const addOnboardingRun = (run, source = "manual") => {
     if (!run?.ticker) return;
@@ -1072,9 +1293,17 @@ export default function Screener() {
                             />
                         </div>
                     </div>
+
+                    <ThresholdSlider
+                        buyMin={buyMin}
+                        watchMin={watchMin}
+                        onChange={(w, b) => { setWatchMin(w); setBuyMin(b); }}
+                    />
+
                     <div className="text-xs text-slate-500 bg-white px-2 py-1 rounded border">
                         Buy ≥{(lensConfig.buy || 6.5).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
                     </div>
+
                 </div>
             )}
           </CardContent>
@@ -1176,6 +1405,16 @@ export default function Screener() {
                                                 <Badge className={`${getRecommendationBadge(item.recommendation)} font-semibold text-xs cursor-help`}>
                                                     {item.recommendation}
                                                 </Badge>
+
+                                                {item.mos != null && (
+                                                    <Badge variant="outline" className="text-xs px-1.5 py-0.5 font-mono">
+                                                        {item.mos >= 0 ? "+" : ""}{(item.mos * 100).toFixed(0)}%
+                                                    </Badge>
+                                                )}
+                                                <Badge variant="outline" className="text-xs px-1.5 py-0.5">
+                                                    Conf ✓
+                                                </Badge>
+
                                                 {item.mosStatus && (
                                                     <Badge variant="outline" className="text-xs px-1.5 py-0.5">{item.mosStatus}</Badge>
                                                 )}
@@ -1184,17 +1423,28 @@ export default function Screener() {
                                                       Conf {item.confStatus}
                                                     </Badge>
                                                 )}
+
                                             </div>
                                         </TooltipTrigger>
                                         <TooltipContent>
                                             <div className="text-xs">
                                                 <p className="font-semibold">Based on {selectedLens.name}</p>
                                                 {lensConfig && (
-                                                    <p>Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}</p>
+                                                    <p>
+                                                      Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}
+                                                      {lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}
+                                                      {lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}
+                                                    </p>
+                                                )}
+                                                {item.mos != null && (
+                                                    <p className="mt-1 text-slate-600">
+                                                        MOS signal: {item.mosSig} ({(item.mos * 100).toFixed(1)}%)
+                                                    </p>
                                                 )}
                                                 {item.mos !== null && (
                                                     <p className="mt-1 text-slate-600">
                                                         Current MOS: {(item.mos * 100).toFixed(1)}%
+
                                                     </p>
                                                 )}
                                                 <p className="mt-1 text-slate-600">
@@ -1209,7 +1459,8 @@ export default function Screener() {
                               <TooltipProvider>
                                 <Tooltip delayDuration={100}>
                                     <TooltipTrigger asChild>
-                                        <Badge className={`font-mono ${getScoreColor(item.finalScore)}`}>
+
+                                        <Badge className={`font-mono ${getScoreColor(item.finalScore, buyMin, watchMin)}`}>
                                             {item.finalScore.toFixed(2)}
                                         </Badge>
                                     </TooltipTrigger>
@@ -1220,7 +1471,8 @@ export default function Screener() {
                             {Object.keys(item.scores).filter(k => ["valuation", "quality", "capitalAllocation", "growth", "moat", "risk"].includes(k)).map((key) => (
                               <TableCell key={key} className="text-center">
                                 <span className={`px-2 py-1 rounded text-xs font-medium ${
-                                  item.scores[key] != null ? getScoreColor(item.scores[key]) : 'text-slate-400'
+
+                                  item.scores[key] != null ? getScoreColor(item.scores[key], buyMin, watchMin) : 'text-slate-400'
                                 }`}>
                                   {item.scores[key] != null ? item.scores[key].toFixed(1) : '--'}
                                 </span>
@@ -1333,7 +1585,13 @@ export default function Screener() {
           </TabsContent>
         </Tabs>
       </div>
-      {detailTicker && <StockDetailDrawer ticker={detailTicker.ticker} metrics={detailTicker.metrics} />}
+      {detailTicker && (
+        <StockDetailDrawer
+          ticker={detailTicker.ticker}
+          metrics={detailTicker.metrics}
+          onSaveSubjective={handleSaveSubjectiveMetrics}
+        />
+      )}
       {traceDrawerData && (
         <ScoreTraceDrawer
           ticker={traceDrawerData.ticker}
