@@ -2075,16 +2075,31 @@ def get_latest_valuation_attribution(db: Session, portfolio_id: str) -> dict[str
         }
         for t in all_tickers
     }
+    prev_nav = Decimal(str(float(previous.nav))) if previous else Decimal("0")
+    curr_nav = Decimal(str(float(latest.nav)))
+    tx_delta = Decimal(str(float(latest.transaction_change_component or 0.0)))
+    price_delta = Decimal(str(float(latest.price_change_component or 0.0)))
+    fx_delta = Decimal(str(sum(float(v) for v in fx.values())))
+    corp_delta = Decimal(str(sum(float(v) for v in corporate.values())))
+    unexplained = Decimal(str(float(latest.unexplained_delta or 0.0)))
+    explained = (tx_delta + price_delta + fx_delta + corp_delta).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    if unexplained != Decimal("0").quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP):
+        raise PortfolioEngineError("Attribution guard failed: unexplained_delta must be 0.")
+    if (prev_nav + explained).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP) != curr_nav.quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    ):
+        raise PortfolioEngineError("Attribution guard failed: component sum does not match current NAV.")
+
     return {
         "portfolio_id": portfolio_id,
-        "previous_nav": float(previous.nav) if previous else 0.0,
-        "current_nav": float(latest.nav),
-        "transaction_delta": float(latest.transaction_change_component or 0.0),
-        "price_delta": float(latest.price_change_component or 0.0),
-        "fx_delta": float(sum(float(v) for v in fx.values())),
-        "corporate_action_delta": float(sum(float(v) for v in corporate.values())),
-        "unexplained_delta": float(latest.unexplained_delta or 0.0),
-        "total_explained_delta": float(latest.total_explained_delta or 0.0),
+        "previous_nav": float(prev_nav),
+        "current_nav": float(curr_nav),
+        "transaction_delta": float(tx_delta),
+        "price_delta": float(price_delta),
+        "fx_delta": float(fx_delta),
+        "corporate_action_delta": float(corp_delta),
+        "unexplained_delta": float(unexplained),
+        "total_explained_delta": float(explained),
         "breakdown_by_ticker": breakdown,
         "valuation_snapshot_id": latest.id,
         "valuation_version": int(latest.valuation_version or 0),
