@@ -120,3 +120,20 @@ async def fetch_annual_financials(ticker: str) -> dict | None:
     except Exception as exc:
         logger.warning("[Finnhub] Annual data fetch failed: %s", exc)
         return None
+
+
+async def fetch_basic_financials(ticker: str) -> dict:
+    """GET /stock/metric?symbol={ticker}&metric=all — returns key ratios including 5Y CAGR values."""
+    if not _get_api_key():
+        raise RuntimeError("FINNHUB_API_KEY environment variable is not set")
+    url = _build_url(
+        "stock/metric",
+        symbol=ticker,
+        metric="all",
+        token=_get_api_key(),
+    )
+    try:
+        return await gated_fetch(url)
+    except Exception as exc:
+        logger.warning("[Finnhub] Basic financials fetch failed: %s", exc)
+        return {}

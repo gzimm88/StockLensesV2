@@ -1,0 +1,3 @@
+scope,ticker,irr,realized_pnl,unrealized_pnl,total_return,holding_period_days
+ticker,AAPL,5131576.9761842955,0.0,1316.639892578125,1316.639892578125,23
+portfolio,ALL,2728.5473808942306,0,1316.639892578125,1316.639892578125,23

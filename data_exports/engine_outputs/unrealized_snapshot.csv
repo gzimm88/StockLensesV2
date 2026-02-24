@@ -1,0 +1,2 @@
+as_of_date,ticker,lot_id,shares_remaining,entry_date,entry_price,current_price,local_unrealized,fx_unrealized,total_unrealized
+2026-02-24,AAPL,1,8.0,2026-02-01,100.0,264.5799865722656,1316.639892578125,0.0,1316.639892578125
