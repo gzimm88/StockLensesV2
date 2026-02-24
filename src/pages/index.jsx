@@ -5,6 +5,8 @@ import Screener from "./Screener";
 import Lenses from "./Lenses";
 
 import Projection from "./Projection";
+import Portfolio from "./Portfolio";
+import Portfolios from "./Portfolios";
 
 import { BrowserRouter as Router, Route, Routes, useLocation } from 'react-router-dom';
 
@@ -15,6 +17,8 @@ const PAGES = {
     Lenses: Lenses,
     
     Projection: Projection,
+    Portfolio: Portfolio,
+    Portfolios: Portfolios,
     
 }
 
@@ -48,6 +52,9 @@ function PagesContent() {
                 <Route path="/Lenses" element={<Lenses />} />
                 
                 <Route path="/Projection" element={<Projection />} />
+                <Route path="/Portfolio" element={<Portfolio />} />
+                <Route path="/Portfolios" element={<Portfolios />} />
+                <Route path="/portfolios" element={<Portfolios />} />
                 
             </Routes>
         </Layout>
