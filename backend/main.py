@@ -45,6 +45,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
     create_portfolio,
+    get_latest_valuation_attribution,
     get_latest_valuation_diff,
     get_or_create_default_portfolio,
     import_transactions_from_csv_for_portfolio,
@@ -141,6 +142,28 @@ def _ensure_phase5_schema() -> None:
 
 
 _ensure_phase5_schema()
+
+
+def _ensure_phase6_schema() -> None:
+    with engine.begin() as conn:
+        val_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(valuation_snapshots)"))}
+        if not val_cols:
+            return
+        if "price_attribution_json" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN price_attribution_json TEXT"))
+        if "fx_attribution_json" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN fx_attribution_json TEXT"))
+        if "transaction_attribution_json" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN transaction_attribution_json TEXT"))
+        if "corporate_action_attribution_json" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN corporate_action_attribution_json TEXT"))
+        if "total_explained_delta" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN total_explained_delta FLOAT"))
+        if "unexplained_delta" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN unexplained_delta FLOAT"))
+
+
+_ensure_phase6_schema()
 
 
 def _bootstrap_default_portfolio() -> None:
@@ -517,6 +540,19 @@ def get_portfolio_valuation_diff(portfolio_id: str, db: Session = Depends(get_db
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio valuation diff loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/valuation-attribution", response_model=PortfolioProcessResponse)
+def get_portfolio_valuation_attribution(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_latest_valuation_attribution(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio valuation attribution loaded",
         data=data,
     )
 
