@@ -49,7 +49,8 @@ export async function getLastPortfolioRun(portfolioId) {
   try {
     return await apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/last`, { method: "GET" });
   } catch (err) {
-    if (String(err?.message || "").includes("404")) return null;
+    const msg = String(err?.message || "");
+    if (msg.includes("404") || msg.includes("No saved portfolio run found")) return null;
     throw err;
   }
 }
@@ -64,25 +65,58 @@ export async function getLatestPortfolioRunMetadata(portfolioId) {
 }
 
 export function listPortfolioTransactions(portfolioId) {
-  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" });
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" }).then((res) => {
+    const raw = res?.data?.transactions || [];
+    const mapped = raw.map((tx) => ({
+      id: tx.id,
+      ticker: tx.ticker,
+      ticker_raw: tx.ticker,
+      type: tx.type,
+      trade_date: tx.date,
+      shares: tx.quantity,
+      price: tx.price,
+      currency: tx.currency,
+      note: null,
+      version: tx.version,
+      created_at: tx.created_at,
+      updated_at: tx.updated_at,
+      deleted_at: tx.deleted_at,
+    }));
+    return { ...res, data: { ...(res?.data || {}), transactions: mapped } };
+  });
 }
 
 export function createPortfolioTransaction(portfolioId, payload) {
-  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, {
+  return apiFetch(`/transactions`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      portfolio_id: portfolioId,
+      ticker: payload.ticker,
+      type: payload.type,
+      quantity: payload.shares,
+      price: payload.price,
+      date: payload.trade_date,
+      currency: payload.currency,
+    }),
   });
 }
 
 export function updatePortfolioTransaction(portfolioId, transactionId, payload) {
-  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
+  return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
     method: "PUT",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ticker: payload.ticker,
+      type: payload.type,
+      quantity: payload.shares,
+      price: payload.price,
+      date: payload.trade_date,
+      currency: payload.currency,
+    }),
   });
 }
 
 export function deletePortfolioTransaction(portfolioId, transactionId) {
-  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
+  return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
     method: "DELETE",
   });
 }
