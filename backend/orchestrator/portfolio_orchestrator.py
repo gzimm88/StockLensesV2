@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 
 from backend.api_clients import yahoo_client
 from backend.models import (
+    CorporateAction,
+    LedgerSnapshot,
     Portfolio,
     PortfolioCorrectionEvent,
     PortfolioCoverageEvent,
@@ -41,6 +43,7 @@ LAST_RUN_PATH = PRICES_PATH.parent / "last_portfolio_run.json"
 RUN_CACHE_DIR = PRICES_PATH.parent / "engine_outputs" / "portfolio_runs"
 _LOCK_MAP_GUARD = threading.Lock()
 _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
+_LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER_CHANGE", "MERGE"}
 
 
 @dataclass(frozen=True)
@@ -789,6 +792,15 @@ def _normalize_ticker_for_transaction(raw_ticker: str) -> tuple[str, str]:
     return ticker_raw, ticker_normalized
 
 
+def _normalize_corporate_action_type(action_type: str) -> str:
+    value = (action_type or "").strip().upper()
+    if value not in _LEDGER_ACTION_TYPES:
+        raise PortfolioEngineError(
+            "Corporate action type must be one of SPLIT, REVERSE_SPLIT, DIVIDEND, SPINOFF, TICKER_CHANGE, MERGE."
+        )
+    return value
+
+
 def _sorted_active_transactions(
     db: Session,
     portfolio_id: str,
@@ -809,6 +821,33 @@ def _sorted_active_transactions(
     rows.sort(
         key=lambda r: (
             r.trade_date,
+            r.created_at or datetime.min,
+            r.id,
+        )
+    )
+    return rows
+
+
+def _sorted_active_corporate_actions(
+    db: Session,
+    portfolio_id: str,
+    *,
+    exclude_id: str | None = None,
+) -> list[CorporateAction]:
+    q = (
+        db.query(CorporateAction)
+        .filter(
+            CorporateAction.portfolio_id == portfolio_id,
+            CorporateAction.is_deleted == False,
+            CorporateAction.deleted_at.is_(None),
+        )
+    )
+    if exclude_id:
+        q = q.filter(CorporateAction.id != exclude_id)
+    rows = q.all()
+    rows.sort(
+        key=lambda r: (
+            r.effective_date,
             r.created_at or datetime.min,
             r.id,
         )
@@ -854,6 +893,22 @@ def _validate_sell_inventory(
             shares_open -= shares
 
 
+def _serialize_metadata(metadata: dict[str, object] | None) -> str | None:
+    if metadata is None:
+        return None
+    return json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_metadata(metadata_json: str | None) -> dict[str, object] | None:
+    if not metadata_json:
+        return None
+    try:
+        obj = json.loads(metadata_json)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
 def list_transactions_for_portfolio(db: Session, portfolio_id: str) -> list[dict[str, object]]:
     get_portfolio_or_error(db, portfolio_id)
     rows = _sorted_active_transactions(db, portfolio_id)
@@ -869,6 +924,30 @@ def list_transactions_for_portfolio(db: Session, portfolio_id: str) -> list[dict
                 "price": float(r.price),
                 "date": r.trade_date.isoformat(),
                 "currency": r.currency,
+                "version": int(r.version or 1),
+                "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() + "Z" if r.updated_at else None,
+                "deleted_at": r.deleted_at.isoformat() + "Z" if r.deleted_at else None,
+            }
+        )
+    return out
+
+
+def list_corporate_actions_for_portfolio(db: Session, portfolio_id: str) -> list[dict[str, object]]:
+    get_portfolio_or_error(db, portfolio_id)
+    rows = _sorted_active_corporate_actions(db, portfolio_id)
+    out: list[dict[str, object]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": r.id,
+                "portfolio_id": r.portfolio_id,
+                "ticker": r.ticker,
+                "type": r.action_type,
+                "effective_date": r.effective_date.isoformat(),
+                "factor": float(r.factor) if r.factor is not None else None,
+                "cash_amount": float(r.cash_amount) if r.cash_amount is not None else None,
+                "metadata": _parse_metadata(r.metadata_json),
                 "version": int(r.version or 1),
                 "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
                 "updated_at": r.updated_at.isoformat() + "Z" if r.updated_at else None,
@@ -1052,6 +1131,319 @@ def soft_delete_transaction(db: Session, transaction_id: str) -> dict[str, objec
         "id": row.id,
         "portfolio_id": row.portfolio_id,
         "deleted_at": now.isoformat() + "Z",
+    }
+
+
+def create_corporate_action(
+    db: Session,
+    *,
+    portfolio_id: str,
+    ticker: str,
+    action_type: str,
+    effective_date: date,
+    factor: float | None = None,
+    cash_amount: float | None = None,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    ticker_raw, ticker_normalized = _normalize_ticker_for_transaction(ticker)
+    action_type_norm = _normalize_corporate_action_type(action_type)
+    factor_value = float(factor) if factor is not None else None
+    cash_value = float(cash_amount) if cash_amount is not None else None
+
+    if action_type_norm in {"SPLIT", "REVERSE_SPLIT"}:
+        if factor_value is None or factor_value <= 0:
+            raise PortfolioEngineError("Factor must be > 0 for SPLIT and REVERSE_SPLIT actions.")
+    if action_type_norm == "DIVIDEND" and cash_value is None:
+        raise PortfolioEngineError("cash_amount is required for DIVIDEND action.")
+
+    now = datetime.utcnow()
+    row = CorporateAction(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        ticker=ticker_normalized,
+        action_type=action_type_norm,
+        effective_date=effective_date,
+        factor=factor_value,
+        cash_amount=cash_value,
+        metadata_json=_serialize_metadata(metadata),
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+        version=1,
+        is_deleted=False,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "portfolio_id": row.portfolio_id,
+        "ticker": ticker_raw,
+        "type": row.action_type,
+        "effective_date": row.effective_date.isoformat(),
+        "factor": float(row.factor) if row.factor is not None else None,
+        "cash_amount": float(row.cash_amount) if row.cash_amount is not None else None,
+        "metadata": _parse_metadata(row.metadata_json),
+        "version": int(row.version or 1),
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "deleted_at": row.deleted_at.isoformat() + "Z" if row.deleted_at else None,
+    }
+
+
+def update_corporate_action(
+    db: Session,
+    *,
+    action_id: str,
+    ticker: str,
+    action_type: str,
+    effective_date: date,
+    factor: float | None = None,
+    cash_amount: float | None = None,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    original = (
+        db.query(CorporateAction)
+        .filter(CorporateAction.id == action_id, CorporateAction.is_deleted == False)
+        .first()
+    )
+    if not original:
+        raise PortfolioEngineError(f"Corporate action '{action_id}' not found.")
+
+    ticker_raw, ticker_normalized = _normalize_ticker_for_transaction(ticker)
+    action_type_norm = _normalize_corporate_action_type(action_type)
+    factor_value = float(factor) if factor is not None else None
+    cash_value = float(cash_amount) if cash_amount is not None else None
+    if action_type_norm in {"SPLIT", "REVERSE_SPLIT"}:
+        if factor_value is None or factor_value <= 0:
+            raise PortfolioEngineError("Factor must be > 0 for SPLIT and REVERSE_SPLIT actions.")
+    if action_type_norm == "DIVIDEND" and cash_value is None:
+        raise PortfolioEngineError("cash_amount is required for DIVIDEND action.")
+
+    now = datetime.utcnow()
+    original.is_deleted = True
+    original.deleted_at = now
+    original.updated_at = now
+
+    row = CorporateAction(
+        id=str(uuid.uuid4()),
+        portfolio_id=original.portfolio_id,
+        ticker=ticker_normalized,
+        action_type=action_type_norm,
+        effective_date=effective_date,
+        factor=factor_value,
+        cash_amount=cash_value,
+        metadata_json=_serialize_metadata(metadata),
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+        version=int(original.version or 1) + 1,
+        is_deleted=False,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "portfolio_id": row.portfolio_id,
+        "ticker": ticker_raw,
+        "type": row.action_type,
+        "effective_date": row.effective_date.isoformat(),
+        "factor": float(row.factor) if row.factor is not None else None,
+        "cash_amount": float(row.cash_amount) if row.cash_amount is not None else None,
+        "metadata": _parse_metadata(row.metadata_json),
+        "version": int(row.version or 1),
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "deleted_at": row.deleted_at.isoformat() + "Z" if row.deleted_at else None,
+    }
+
+
+def soft_delete_corporate_action(db: Session, action_id: str) -> dict[str, object]:
+    row = (
+        db.query(CorporateAction)
+        .filter(CorporateAction.id == action_id, CorporateAction.is_deleted == False)
+        .first()
+    )
+    if not row:
+        raise PortfolioEngineError(f"Corporate action '{action_id}' not found.")
+    now = datetime.utcnow()
+    row.is_deleted = True
+    row.deleted_at = now
+    row.updated_at = now
+    db.commit()
+    return {"id": row.id, "portfolio_id": row.portfolio_id, "deleted_at": now.isoformat() + "Z"}
+
+
+def _hash_ledger_inputs(
+    transactions: list[PortfolioTransaction],
+    actions: list[CorporateAction],
+) -> str:
+    canonical: list[dict[str, object]] = []
+    for r in transactions:
+        canonical.append(
+            {
+                "kind": "tx",
+                "id": r.id,
+                "trade_date": r.trade_date.isoformat(),
+                "created_at": (r.created_at or datetime.min).isoformat(),
+                "ticker": r.ticker_symbol_normalized,
+                "tx_type": r.tx_type,
+                "shares": float(r.shares),
+                "price": float(r.price),
+                "gross_amount": float(r.gross_amount),
+                "currency": r.currency,
+            }
+        )
+    for r in actions:
+        canonical.append(
+            {
+                "kind": "action",
+                "id": r.id,
+                "effective_date": r.effective_date.isoformat(),
+                "created_at": (r.created_at or datetime.min).isoformat(),
+                "ticker": r.ticker,
+                "action_type": r.action_type,
+                "factor": float(r.factor) if r.factor is not None else None,
+                "cash_amount": float(r.cash_amount) if r.cash_amount is not None else None,
+                "metadata_json": r.metadata_json or "",
+            }
+        )
+
+    canonical.sort(
+        key=lambda e: (
+            e.get("trade_date") or e.get("effective_date") or "",
+            e.get("created_at") or "",
+            str(e.get("id") or ""),
+        )
+    )
+    blob = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def rebuild_position_ledger(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    tx_rows = _sorted_active_transactions(db, portfolio_id)
+    action_rows = _sorted_active_corporate_actions(db, portfolio_id)
+
+    events: list[dict[str, object]] = []
+    for tx in tx_rows:
+        events.append(
+            {
+                "kind": "tx",
+                "event_date": tx.trade_date,
+                "created_at": tx.created_at or datetime.min,
+                "id": tx.id,
+                "row": tx,
+            }
+        )
+    for action in action_rows:
+        events.append(
+            {
+                "kind": "action",
+                "event_date": action.effective_date,
+                "created_at": action.created_at or datetime.min,
+                "id": action.id,
+                "row": action,
+            }
+        )
+    events.sort(key=lambda e: (e["event_date"], e["created_at"], e["id"]))
+
+    qty: dict[str, float] = defaultdict(float)
+    basis_value: dict[str, float] = defaultdict(float)
+    cash = 0.0
+
+    for event in events:
+        if event["kind"] == "tx":
+            tx: PortfolioTransaction = event["row"]  # type: ignore[assignment]
+            ticker = tx.ticker_symbol_normalized
+            shares = float(tx.shares or 0.0)
+            price = float(tx.price or 0.0)
+            gross = float(tx.gross_amount or (shares * price))
+            if tx.tx_type == "Buy":
+                qty[ticker] += shares
+                basis_value[ticker] += shares * price
+                cash -= gross
+            elif tx.tx_type == "Sell":
+                current_qty = qty[ticker]
+                if shares > current_qty + 1e-12:
+                    raise PortfolioEngineError(
+                        f"Ledger rebuild failed: sell exceeds holdings for {ticker}. Sell={shares}, holdings={current_qty}."
+                    )
+                avg_cost = (basis_value[ticker] / current_qty) if current_qty > 0 else 0.0
+                qty[ticker] = current_qty - shares
+                basis_value[ticker] -= avg_cost * shares
+                if qty[ticker] <= 1e-12:
+                    qty[ticker] = 0.0
+                    basis_value[ticker] = 0.0
+                cash += gross
+            elif tx.tx_type == "Dividend":
+                cash += gross
+        else:
+            action: CorporateAction = event["row"]  # type: ignore[assignment]
+            ticker = action.ticker
+            if action.action_type == "SPLIT":
+                factor = float(action.factor or 0.0)
+                if factor <= 0:
+                    raise PortfolioEngineError(f"Ledger rebuild failed: invalid split factor for {ticker}.")
+                qty[ticker] *= factor
+            elif action.action_type == "REVERSE_SPLIT":
+                factor = float(action.factor or 0.0)
+                if factor <= 0:
+                    raise PortfolioEngineError(f"Ledger rebuild failed: invalid reverse split factor for {ticker}.")
+                qty[ticker] /= factor
+            elif action.action_type == "DIVIDEND":
+                if action.cash_amount is None:
+                    raise PortfolioEngineError(f"Ledger rebuild failed: dividend action missing cash_amount for {ticker}.")
+                cash += float(action.cash_amount)
+
+        # No shorts constraint after every event
+        if any(v < -1e-12 for v in qty.values()):
+            raise PortfolioEngineError("Ledger rebuild failed: negative holdings detected.")
+
+    holdings: dict[str, float] = {}
+    basis: dict[str, float] = {}
+    for ticker in sorted(set(list(qty.keys()) + list(basis_value.keys()))):
+        q = qty[ticker]
+        if q <= 1e-12:
+            continue
+        holdings[ticker] = q
+        basis[ticker] = basis_value[ticker] / q if q > 0 else 0.0
+
+    input_hash = _hash_ledger_inputs(tx_rows, action_rows)
+    current_version = (
+        db.query(LedgerSnapshot)
+        .filter(LedgerSnapshot.portfolio_id == portfolio_id)
+        .order_by(LedgerSnapshot.ledger_version.desc())
+        .first()
+    )
+    next_version = int(current_version.ledger_version if current_version else 0) + 1
+    now = datetime.utcnow()
+    snapshot = LedgerSnapshot(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        ledger_version=next_version,
+        as_of=now,
+        holdings_json=json.dumps(holdings, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        basis_json=json.dumps(basis, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        cash=float(cash),
+        input_hash=input_hash,
+        created_at=now,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return {
+        "id": snapshot.id,
+        "portfolio_id": snapshot.portfolio_id,
+        "ledger_version": snapshot.ledger_version,
+        "as_of": snapshot.as_of.isoformat() + "Z",
+        "holdings": holdings,
+        "basis": basis,
+        "cash": float(snapshot.cash or 0.0),
+        "input_hash": snapshot.input_hash,
+        "created_at": snapshot.created_at.isoformat() + "Z" if snapshot.created_at else None,
     }
 
 
