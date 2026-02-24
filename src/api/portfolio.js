@@ -65,58 +65,107 @@ export async function getLatestPortfolioRunMetadata(portfolioId) {
 }
 
 export function listPortfolioTransactions(portfolioId) {
-  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" }).then((res) => {
+  const normalize = (res) => {
     const raw = res?.data?.transactions || [];
     const mapped = raw.map((tx) => ({
       id: tx.id,
       ticker: tx.ticker,
-      ticker_raw: tx.ticker,
+      ticker_raw: tx.ticker_raw || tx.ticker,
       type: tx.type,
-      trade_date: tx.date,
-      shares: tx.quantity,
+      trade_date: tx.trade_date || tx.date,
+      shares: tx.shares ?? tx.quantity,
       price: tx.price,
       currency: tx.currency,
-      note: null,
+      note: tx.note ?? null,
       version: tx.version,
       created_at: tx.created_at,
       updated_at: tx.updated_at,
       deleted_at: tx.deleted_at,
     }));
     return { ...res, data: { ...(res?.data || {}), transactions: mapped } };
-  });
+  };
+
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" })
+    .then(normalize)
+    .catch(async (err) => {
+      const msg = String(err?.message || "");
+      if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
+      const res = await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" });
+      return normalize(res);
+    });
 }
 
 export function createPortfolioTransaction(portfolioId, payload) {
-  return apiFetch(`/transactions`, {
+  const legacyPayload = {
+    ticker: payload.ticker,
+    type: payload.type,
+    trade_date: payload.trade_date,
+    shares: payload.shares,
+    price: payload.price,
+    currency: payload.currency,
+    note: payload.note ?? null,
+  };
+  const newPayload = {
+    portfolio_id: portfolioId,
+    ticker: payload.ticker,
+    type: payload.type,
+    quantity: payload.shares,
+    price: payload.price,
+    date: payload.trade_date,
+    currency: payload.currency,
+  };
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, {
     method: "POST",
-    body: JSON.stringify({
-      portfolio_id: portfolioId,
-      ticker: payload.ticker,
-      type: payload.type,
-      quantity: payload.shares,
-      price: payload.price,
-      date: payload.trade_date,
-      currency: payload.currency,
-    }),
+    body: JSON.stringify(legacyPayload),
+  }).catch(async (err) => {
+    const msg = String(err?.message || "");
+    if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
+    return apiFetch(`/transactions`, {
+      method: "POST",
+      body: JSON.stringify(newPayload),
+    });
   });
 }
 
 export function updatePortfolioTransaction(portfolioId, transactionId, payload) {
-  return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
+  const legacyPayload = {
+    ticker: payload.ticker,
+    type: payload.type,
+    trade_date: payload.trade_date,
+    shares: payload.shares,
+    price: payload.price,
+    currency: payload.currency,
+    note: payload.note ?? null,
+  };
+  const newPayload = {
+    ticker: payload.ticker,
+    type: payload.type,
+    quantity: payload.shares,
+    price: payload.price,
+    date: payload.trade_date,
+    currency: payload.currency,
+  };
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
     method: "PUT",
-    body: JSON.stringify({
-      ticker: payload.ticker,
-      type: payload.type,
-      quantity: payload.shares,
-      price: payload.price,
-      date: payload.trade_date,
-      currency: payload.currency,
-    }),
+    body: JSON.stringify(legacyPayload),
+  }).catch(async (err) => {
+    const msg = String(err?.message || "");
+    if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
+    return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
+      method: "PUT",
+      body: JSON.stringify(newPayload),
+    });
   });
 }
 
 export function deletePortfolioTransaction(portfolioId, transactionId) {
-  return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
     method: "DELETE",
+  }).catch(async (err) => {
+    const msg = String(err?.message || "");
+    if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
+    return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
+      method: "DELETE",
+    });
   });
 }
