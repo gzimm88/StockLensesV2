@@ -42,16 +42,21 @@ from backend.orchestrator.onboarding_orchestrator import (
     ticker_is_onboarded,
 )
 from backend.orchestrator.portfolio_orchestrator import (
+    create_corporate_action,
     create_transaction,
     create_portfolio,
     get_or_create_default_portfolio,
     import_transactions_from_csv_for_portfolio,
+    list_corporate_actions_for_portfolio,
     list_transactions_for_portfolio,
     list_portfolios,
     load_last_portfolio_run,
+    rebuild_position_ledger,
     run_portfolio_creation_flow,
+    soft_delete_corporate_action,
     soft_delete_portfolio,
     soft_delete_transaction,
+    update_corporate_action,
     update_transaction,
 )
 from backend.repositories import financials_repo, metrics_repo, prices_repo
@@ -206,6 +211,25 @@ class TransactionUpdateRequest(BaseModel):
     price: float
     date: date
     currency: str = "USD"
+
+
+class CorporateActionCreateRequest(BaseModel):
+    portfolio_id: str
+    ticker: str
+    type: str
+    effective_date: date
+    factor: float | None = None
+    cash_amount: float | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class CorporateActionUpdateRequest(BaseModel):
+    ticker: str
+    type: str
+    effective_date: date
+    factor: float | None = None
+    cash_amount: float | None = None
+    metadata: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +387,77 @@ def get_transactions_for_portfolio(portfolio_id: str, db: Session = Depends(get_
         ok=True,
         message="Portfolio transactions loaded",
         data={"transactions": rows},
+    )
+
+
+@app.post("/corporate-actions", response_model=PortfolioProcessResponse)
+def post_corporate_action(payload: CorporateActionCreateRequest, db: Session = Depends(get_db)):
+    try:
+        data = create_corporate_action(
+            db,
+            portfolio_id=payload.portfolio_id,
+            ticker=payload.ticker,
+            action_type=payload.type,
+            effective_date=payload.effective_date,
+            factor=payload.factor,
+            cash_amount=payload.cash_amount,
+            metadata=payload.metadata,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Corporate action created", data=data)
+
+
+@app.put("/corporate-actions/{action_id}", response_model=PortfolioProcessResponse)
+def put_corporate_action(action_id: str, payload: CorporateActionUpdateRequest, db: Session = Depends(get_db)):
+    try:
+        data = update_corporate_action(
+            db,
+            action_id=action_id,
+            ticker=payload.ticker,
+            action_type=payload.type,
+            effective_date=payload.effective_date,
+            factor=payload.factor,
+            cash_amount=payload.cash_amount,
+            metadata=payload.metadata,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Corporate action updated", data=data)
+
+
+@app.delete("/corporate-actions/{action_id}", response_model=PortfolioProcessResponse)
+def delete_corporate_action(action_id: str, db: Session = Depends(get_db)):
+    try:
+        data = soft_delete_corporate_action(db, action_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Corporate action soft-deleted", data=data)
+
+
+@app.get("/portfolios/{portfolio_id}/corporate-actions", response_model=PortfolioProcessResponse)
+def get_corporate_actions_for_portfolio(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        rows = list_corporate_actions_for_portfolio(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio corporate actions loaded",
+        data={"corporate_actions": rows},
+    )
+
+
+@app.post("/portfolios/{portfolio_id}/rebuild-ledger", response_model=PortfolioProcessResponse)
+def post_rebuild_ledger_for_portfolio(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = rebuild_position_ledger(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio ledger rebuilt",
+        data=data,
     )
 
 
