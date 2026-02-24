@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from collections import defaultdict
@@ -49,6 +50,8 @@ RUN_CACHE_DIR = PRICES_PATH.parent / "engine_outputs" / "portfolio_runs"
 _LOCK_MAP_GUARD = threading.Lock()
 _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
 _LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER_CHANGE", "MERGE"}
+_DECIMAL_MONEY_SCALE = Decimal("0.0000000001")
+_DECIMAL_RATE_SCALE = Decimal("0.000000000001")
 
 
 @dataclass(frozen=True)
@@ -1631,6 +1634,7 @@ def rebuild_valuation_snapshot(
     strict: bool = False,
     stale_trading_days: int = 3,
 ) -> dict[str, object]:
+    start_ts = time.perf_counter()
     portfolio = get_portfolio_or_error(db, portfolio_id)
     ledger = _latest_ledger_snapshot_or_error(db, portfolio_id)
     holdings = json.loads(ledger.holdings_json or "{}")
@@ -1641,24 +1645,53 @@ def rebuild_valuation_snapshot(
     base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
     valuation_date = date.today()
 
+    # Guard against unstable holdings ordering / payload anomalies.
+    holdings_items: list[tuple[str, float]] = []
+    for k, v in holdings.items():
+        qty = float(v)
+        if qty < -1e-12:
+            raise PortfolioEngineError(f"Negative holdings detected for {k} in ledger snapshot.")
+        if qty > 0.0:
+            holdings_items.append((str(k).upper(), qty))
+    sorted_tickers = sorted(holdings_items, key=lambda x: x[0])
+    if [t for t, _ in sorted_tickers] != sorted({t for t, _ in sorted_tickers}):
+        raise PortfolioEngineError("Snapshot ordering unstable for valuation rebuild.")
+
     price_snaps: list[PriceSnapshot] = []
     fx_snaps: list[FXRateSnapshot] = []
     fx_by_quote: dict[str, FXRateSnapshot] = {}
     stale_tickers: list[str] = []
+    missing_tickers: list[str] = []
     excluded_tickers: list[str] = []
     components: list[dict[str, object]] = []
     nav = Decimal("0")
 
-    sorted_tickers = sorted((str(k).upper(), float(v)) for k, v in holdings.items() if float(v) > 0.0)
     for ticker, qty_float in sorted_tickers:
         currency = ticker_currency.get(ticker, base_currency)
-        price_snap = _resolve_price_snapshot(
-            db,
-            portfolio_id=portfolio_id,
-            ticker=ticker,
-            currency=currency,
-        )
-        price_snaps.append(price_snap)
+        try:
+            price_snap = _resolve_price_snapshot(
+                db,
+                portfolio_id=portfolio_id,
+                ticker=ticker,
+                currency=currency,
+            )
+            price_snaps.append(price_snap)
+        except PortfolioEngineError:
+            if strict:
+                raise
+            missing_tickers.append(ticker)
+            excluded_tickers.append(ticker)
+            components.append(
+                {
+                    "ticker": ticker,
+                    "quantity": qty_float,
+                    "price": None,
+                    "currency": currency,
+                    "included": False,
+                    "reason": "missing_price",
+                }
+            )
+            continue
 
         stale_days = _trading_days_since(price_snap.as_of.date(), valuation_date)
         is_stale = stale_days > int(stale_trading_days)
@@ -1682,7 +1715,7 @@ def rebuild_valuation_snapshot(
             )
             continue
 
-        fx_rate = Decimal("1")
+        fx_rate = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
         fx_source = None
         fx_as_of = None
         if currency != base_currency:
@@ -1696,13 +1729,13 @@ def rebuild_valuation_snapshot(
                 )
                 fx_by_quote[currency] = fx
                 fx_snaps.append(fx)
-            fx_rate = Decimal(str(fx.rate))
+            fx_rate = Decimal(str(fx.rate)).quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
             fx_source = fx.source
             fx_as_of = fx.as_of.date().isoformat()
 
         qty = Decimal(str(qty_float))
         price = Decimal(str(price_snap.price))
-        position_value = (qty * price * fx_rate).quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP)
+        position_value = (qty * price * fx_rate).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
         nav += position_value
         components.append(
             {
@@ -1726,6 +1759,7 @@ def rebuild_valuation_snapshot(
         "strict": bool(strict),
         "stale_trading_days": int(stale_trading_days),
         "excluded_tickers": sorted(excluded_tickers),
+        "missing_tickers": sorted(missing_tickers),
     }
     valuation_input_hash = hashlib.sha256(
         json.dumps(valuation_hash_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1734,15 +1768,85 @@ def rebuild_valuation_snapshot(
     as_of_candidates = [s.as_of for s in price_snaps] + [s.as_of for s in fx_snaps]
     as_of = max(as_of_candidates) if as_of_candidates else datetime.utcnow()
     now = datetime.utcnow()
-    nav_float = float(nav.quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP))
+    nav_float = float(nav.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP))
+
+    previous = (
+        db.query(ValuationSnapshot)
+        .filter(ValuationSnapshot.portfolio_id == portfolio_id)
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+    next_version = int(previous.valuation_version if previous else 0) + 1
+
+    prev_components = json.loads(previous.components_json) if previous and previous.components_json else []
+    prev_map: dict[str, dict[str, object]] = {
+        str(c.get("ticker")): c for c in (prev_components if isinstance(prev_components, list) else [])
+    }
+    curr_map: dict[str, dict[str, object]] = {str(c.get("ticker")): c for c in components}
+    holdings_delta: dict[str, float] = {}
+    for ticker in sorted(set(prev_map.keys()) | set(curr_map.keys())):
+        q_prev = float(prev_map.get(ticker, {}).get("quantity") or 0.0)
+        q_curr = float(curr_map.get(ticker, {}).get("quantity") or 0.0)
+        delta_q = q_curr - q_prev
+        if abs(delta_q) > 1e-12:
+            holdings_delta[ticker] = delta_q
+
+    # Decompose NAV change into transaction and price components.
+    tx_component = Decimal("0")
+    price_component = Decimal("0")
+    for ticker in sorted(set(prev_map.keys()) | set(curr_map.keys())):
+        prev = prev_map.get(ticker, {})
+        curr = curr_map.get(ticker, {})
+        if not bool(curr.get("included", False)) and not bool(prev.get("included", False)):
+            continue
+        q_prev = Decimal(str(float(prev.get("quantity") or 0.0)))
+        q_curr = Decimal(str(float(curr.get("quantity") or 0.0)))
+        p_prev = Decimal(str(float(prev.get("price") or 0.0)))
+        p_curr = Decimal(str(float(curr.get("price") or 0.0)))
+        fx_prev = Decimal(str(float(prev.get("fx_rate") or 1.0)))
+        fx_curr = Decimal(str(float(curr.get("fx_rate") or 1.0)))
+        tx_component += ((q_curr - q_prev) * p_prev * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        price_component += (q_curr * ((p_curr * fx_curr) - (p_prev * fx_prev))).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+
+    nav_delta = 0.0 if previous is None else float(
+        (Decimal(str(nav_float)) - Decimal(str(previous.nav))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    )
+    tx_component_float = float(tx_component.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP))
+    price_component_float = float(price_component.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP))
+
+    # Hash validation guard: identical inputs must produce identical NAV.
+    if previous and previous.input_hash == valuation_input_hash and abs(float(previous.nav) - nav_float) > 1e-12:
+        raise PortfolioEngineError(
+            "Hash mismatch guard failed: identical valuation input_hash produced different NAV."
+        )
+
+    elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
+    logger.info(
+        "[ValuationRebuild] portfolio=%s version=%s tickers=%s elapsed_ms=%s nav=%s strict=%s",
+        portfolio_id,
+        next_version,
+        len(sorted_tickers),
+        elapsed_ms,
+        nav_float,
+        bool(strict),
+    )
+
     snapshot = ValuationSnapshot(
         id=str(uuid.uuid4()),
         portfolio_id=portfolio_id,
+        valuation_version=next_version,
         ledger_snapshot_id=ledger.id,
         nav=nav_float,
+        nav_delta=nav_delta if previous else 0.0,
+        holdings_delta_json=json.dumps(holdings_delta, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        price_change_component=price_component_float if previous else 0.0,
+        transaction_change_component=tx_component_float if previous else 0.0,
         currency=base_currency,
         as_of=as_of,
         created_at=now,
+        rebuild_duration_ms=elapsed_ms,
         input_hash=valuation_input_hash,
         components_json=json.dumps(components, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
     )
@@ -1753,18 +1857,63 @@ def rebuild_valuation_snapshot(
     return {
         "valuation_snapshot_id": snapshot.id,
         "portfolio_id": portfolio_id,
+        "valuation_version": snapshot.valuation_version,
         "ledger_snapshot_id": ledger.id,
         "nav": snapshot.nav,
+        "nav_delta": snapshot.nav_delta,
+        "holdings_delta": holdings_delta,
+        "price_change_component": snapshot.price_change_component,
+        "transaction_change_component": snapshot.transaction_change_component,
         "currency": snapshot.currency,
         "as_of": snapshot.as_of.isoformat() + "Z",
         "input_hash": snapshot.input_hash,
         "strict": bool(strict),
         "stale_threshold_trading_days": int(stale_trading_days),
         "stale_tickers": sorted(stale_tickers),
+        "missing_tickers": sorted(missing_tickers),
         "excluded_tickers": sorted(excluded_tickers),
         "price_snapshot_count": len(price_snaps),
         "fx_snapshot_count": len(fx_snaps),
+        "rebuild_duration_ms": elapsed_ms,
         "components": components,
+    }
+
+
+def get_latest_valuation_diff(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    latest = (
+        db.query(ValuationSnapshot)
+        .filter(ValuationSnapshot.portfolio_id == portfolio_id)
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+    if not latest:
+        raise PortfolioEngineError(f"No valuation snapshot found for portfolio '{portfolio_id}'.")
+
+    previous = (
+        db.query(ValuationSnapshot)
+        .filter(
+            ValuationSnapshot.portfolio_id == portfolio_id,
+            ValuationSnapshot.valuation_version < latest.valuation_version,
+        )
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+
+    holdings_delta = json.loads(latest.holdings_delta_json) if latest.holdings_delta_json else {}
+    return {
+        "portfolio_id": portfolio_id,
+        "latest_snapshot_id": latest.id,
+        "latest_valuation_version": int(latest.valuation_version or 0),
+        "latest_nav": float(latest.nav),
+        "latest_input_hash": latest.input_hash,
+        "previous_snapshot_id": previous.id if previous else None,
+        "previous_nav": float(previous.nav) if previous else None,
+        "nav_delta": float(latest.nav_delta or 0.0),
+        "holdings_delta": holdings_delta if isinstance(holdings_delta, dict) else {},
+        "price_change_component": float(latest.price_change_component or 0.0),
+        "transaction_change_component": float(latest.transaction_change_component or 0.0),
+        "as_of": latest.as_of.isoformat() + "Z" if latest.as_of else None,
     }
 
 

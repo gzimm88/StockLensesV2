@@ -45,6 +45,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
     create_portfolio,
+    get_latest_valuation_diff,
     get_or_create_default_portfolio,
     import_transactions_from_csv_for_portfolio,
     list_corporate_actions_for_portfolio,
@@ -118,6 +119,28 @@ def _ensure_phase1_schema() -> None:
 
 
 _ensure_phase1_schema()
+
+
+def _ensure_phase5_schema() -> None:
+    with engine.begin() as conn:
+        val_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(valuation_snapshots)"))}
+        if not val_cols:
+            return
+        if "valuation_version" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN valuation_version INTEGER NOT NULL DEFAULT 1"))
+        if "nav_delta" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN nav_delta FLOAT"))
+        if "holdings_delta_json" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN holdings_delta_json TEXT"))
+        if "price_change_component" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN price_change_component FLOAT"))
+        if "transaction_change_component" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN transaction_change_component FLOAT"))
+        if "rebuild_duration_ms" not in val_cols:
+            conn.execute(text("ALTER TABLE valuation_snapshots ADD COLUMN rebuild_duration_ms INTEGER"))
+
+
+_ensure_phase5_schema()
 
 
 def _bootstrap_default_portfolio() -> None:
@@ -481,6 +504,19 @@ def post_rebuild_valuation_for_portfolio(
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio valuation rebuilt",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/valuation-diff", response_model=PortfolioProcessResponse)
+def get_portfolio_valuation_diff(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_latest_valuation_diff(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio valuation diff loaded",
         data=data,
     )
 
