@@ -202,3 +202,163 @@ class LensPreset(Base):
     created_by_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
     is_sample: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class ScoreSnapshot(Base):
+    """
+    Deterministic score snapshot for a (ticker, lens, as_of_date) triple.
+    Invariant: same metrics + same lens + same SCORE_VERSION → same snapshot_hash.
+
+    Recommendation = score-only (no MOS or confidence gating).
+    MOS is a display signal only (mos_signal: +/0/-).
+    Confidence is an audit signal only (confidence_grade: A/B/C/D).
+    """
+    __tablename__ = "score_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    lens_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    lens_name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Versioning
+    score_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    data_version: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Scores
+    final_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    category_scores: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+
+    # Recommendation (score-only — no MOS or confidence gating)
+    recommendation: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Confidence (audit/display only — does NOT gate recommendation)
+    confidence_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_grade: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # MOS (display signal only — does NOT gate recommendation)
+    mos_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mos_signal: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Explainability
+    top_positive_contributors: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    top_negative_contributors: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    missing_critical_fields: Mapped[str | None] = mapped_column(Text, nullable=True)    # JSON
+    resolution_warnings: Mapped[str | None] = mapped_column(Text, nullable=True)        # JSON
+
+    # Determinism
+    snapshot_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    # Timestamps
+    as_of_date: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    created_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class Portfolio(Base):
+    __tablename__ = "portfolios"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, index=True)
+    base_currency: Mapped[str] = mapped_column(String, nullable=False, default="USD")
+    owner_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PortfolioTransaction(Base):
+    __tablename__ = "portfolio_transactions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    security_id: Mapped[str | None] = mapped_column(String, ForeignKey("security_identities.security_id"), nullable=True, index=True)
+    ticker_symbol_raw: Mapped[str] = mapped_column(String, nullable=False)
+    ticker_symbol_normalized: Mapped[str] = mapped_column(String, index=True)
+    tx_type: Mapped[str] = mapped_column(String, nullable=False)
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    gross_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String, nullable=False, default="USD")
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class SecurityIdentity(Base):
+    __tablename__ = "security_identities"
+
+    security_id: Mapped[str] = mapped_column(String, primary_key=True)
+    normalized_symbol: Mapped[str] = mapped_column(String, unique=True, index=True)
+    exchange: Mapped[str | None] = mapped_column(String, nullable=True)
+    mic: Mapped[str | None] = mapped_column(String, nullable=True)
+    vendor_symbol: Mapped[str | None] = mapped_column(String, nullable=True)
+    raw_symbol_example: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SecuritySymbolMap(Base):
+    __tablename__ = "security_symbol_map"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    raw_input_symbol: Mapped[str] = mapped_column(String, unique=True, index=True)
+    normalized_symbol: Mapped[str] = mapped_column(String, index=True)
+    exchange: Mapped[str | None] = mapped_column(String, nullable=True)
+    mic: Mapped[str | None] = mapped_column(String, nullable=True)
+    vendor_symbol: Mapped[str | None] = mapped_column(String, nullable=True)
+    security_id: Mapped[str] = mapped_column(String, ForeignKey("security_identities.security_id"), index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PortfolioProcessingRun(Base):
+    __tablename__ = "portfolio_processing_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str | None] = mapped_column(String, ForeignKey("portfolios.id"), index=True, nullable=True)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String, index=True)
+    warnings_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hash_inputs: Mapped[str] = mapped_column(String, index=True)
+    engine_version: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class PortfolioCoverageEvent(Base):
+    __tablename__ = "portfolio_coverage_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str | None] = mapped_column(String, ForeignKey("portfolios.id"), index=True, nullable=True)
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("portfolio_processing_runs.id"), index=True)
+    security_id: Mapped[str | None] = mapped_column(String, ForeignKey("security_identities.security_id"), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String, index=True)
+    raw_input_symbol: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, index=True)
+    warning_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fallback_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_missing_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    last_missing_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    coverage_start: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    coverage_end: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PortfolioCorrectionEvent(Base):
+    __tablename__ = "portfolio_correction_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str | None] = mapped_column(String, ForeignKey("portfolios.id"), index=True, nullable=True)
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("portfolio_processing_runs.id"), index=True)
+    ticker: Mapped[str] = mapped_column(String, index=True)
+    row_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_shares: Mapped[float] = mapped_column(Float, nullable=False)
+    available_shares: Mapped[float] = mapped_column(Float, nullable=False)
+    executed_shares: Mapped[float] = mapped_column(Float, nullable=False)
+    delta_shares: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)

@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+from datetime import date, datetime, timezone
 
 # Load .env from repo root before any other imports read os.environ
 try:
@@ -10,14 +11,26 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — set FINNHUB_API_KEY in the shell
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from backend.database import Base, engine, get_db
-from backend.models import FinancialsHistory, LensPreset, Metrics, PricesHistory, Ticker
+from backend.database import Base, SessionLocal, engine, get_db
+from backend.models import (
+    FinancialsHistory,
+    LensPreset,
+    Metrics,
+    Portfolio,
+    PortfolioCorrectionEvent,
+    PortfolioCoverageEvent,
+    PortfolioProcessingRun,
+    PortfolioTransaction,
+    PricesHistory,
+    ScoreSnapshot,
+    Ticker,
+)
 from backend.orchestrator.onboarding_orchestrator import (
     OnboardingResult,
     run_full_onboard,
@@ -28,7 +41,21 @@ from backend.orchestrator.onboarding_orchestrator import (
     step_yahoo_prices_5y,
     ticker_is_onboarded,
 )
+from backend.orchestrator.portfolio_orchestrator import (
+    create_transaction,
+    create_portfolio,
+    get_or_create_default_portfolio,
+    import_transactions_from_csv_for_portfolio,
+    list_transactions_for_portfolio,
+    list_portfolios,
+    load_last_portfolio_run,
+    run_portfolio_creation_flow,
+    soft_delete_portfolio,
+    soft_delete_transaction,
+    update_transaction,
+)
 from backend.repositories import financials_repo, metrics_repo, prices_repo
+from backend.services.portfolio_engine import PortfolioEngineError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,11 +90,122 @@ def _ensure_metrics_schema() -> None:
 _ensure_metrics_schema()
 
 
+def _ensure_phase1_schema() -> None:
+    with engine.begin() as conn:
+        run_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_processing_runs)"))}
+        if run_cols and "portfolio_id" not in run_cols:
+            conn.execute(text("ALTER TABLE portfolio_processing_runs ADD COLUMN portfolio_id TEXT"))
+
+        cov_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_coverage_events)"))}
+        if cov_cols and "portfolio_id" not in cov_cols:
+            conn.execute(text("ALTER TABLE portfolio_coverage_events ADD COLUMN portfolio_id TEXT"))
+
+        corr_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_correction_events)"))}
+        if corr_cols and "portfolio_id" not in corr_cols:
+            conn.execute(text("ALTER TABLE portfolio_correction_events ADD COLUMN portfolio_id TEXT"))
+
+        tx_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_transactions)"))}
+        if tx_cols and "deleted_at" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN deleted_at DATETIME"))
+        if tx_cols and "version" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN version INTEGER NOT NULL DEFAULT 1"))
+
+
+_ensure_phase1_schema()
+
+
+def _bootstrap_default_portfolio() -> None:
+    db = SessionLocal()
+    try:
+        default = get_or_create_default_portfolio(db)
+        run_rows = db.query(PortfolioProcessingRun).filter(PortfolioProcessingRun.portfolio_id.is_(None)).all()
+        for r in run_rows:
+            r.portfolio_id = default.id
+        cov_rows = db.query(PortfolioCoverageEvent).filter(PortfolioCoverageEvent.portfolio_id.is_(None)).all()
+        for r in cov_rows:
+            r.portfolio_id = default.id
+        corr_rows = db.query(PortfolioCorrectionEvent).filter(PortfolioCorrectionEvent.portfolio_id.is_(None)).all()
+        for r in corr_rows:
+            r.portfolio_id = default.id
+        tx_exists = (
+            db.query(PortfolioTransaction)
+            .filter(PortfolioTransaction.portfolio_id == default.id, PortfolioTransaction.is_deleted == False)
+            .first()
+        )
+        if tx_exists is None:
+            try:
+                import_transactions_from_csv_for_portfolio(db, default.id, replace_existing=False)
+            except Exception:
+                pass
+        db.commit()
+    finally:
+        db.close()
+
+
+_bootstrap_default_portfolio()
+
+
 def rows_to_dict(rows):
     return [
         {column.name: getattr(row, column.name) for column in row.__table__.columns}
         for row in rows
     ]
+
+
+class PortfolioProcessResponse(BaseModel):
+    ok: bool
+    message: str
+    data: dict[str, Any] | None = None
+
+
+class CreatePortfolioRequest(BaseModel):
+    name: str
+    base_currency: str = "USD"
+
+
+class MetricsSubjectivePatch(BaseModel):
+    moat_score_0_10: float | None = None
+    riskdownside_score_0_10: float | None = None
+    macrofit_score_0_10: float | None = None
+    narrative_score_0_10: float | None = None
+    founder_led_bool: bool | None = None
+
+    def validated_payload(self) -> dict[str, Any]:
+        payload = self.model_dump(exclude_none=True)
+        for field in (
+            "moat_score_0_10",
+            "riskdownside_score_0_10",
+            "macrofit_score_0_10",
+            "narrative_score_0_10",
+        ):
+            if field not in payload:
+                continue
+            value = payload[field]
+            if not (0.0 <= value <= 10.0):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} must be between 0 and 10.",
+                )
+        return payload
+
+
+class TransactionCreateRequest(BaseModel):
+    portfolio_id: str
+    ticker: str
+    type: str
+    quantity: float
+    price: float
+    date: date
+    currency: str = "USD"
+
+
+class TransactionUpdateRequest(BaseModel):
+    ticker: str
+    type: str
+    quantity: float
+    price: float
+    date: date
+    currency: str = "USD"
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +215,248 @@ def rows_to_dict(rows):
 @app.get("/health")
 def healthcheck():
     return {"status": "ok"}
+
+
+@app.get("/portfolios", response_model=PortfolioProcessResponse)
+def get_portfolios(db: Session = Depends(get_db)):
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolios loaded",
+        data={"portfolios": list_portfolios(db)},
+    )
+
+@app.post("/portfolios", response_model=PortfolioProcessResponse)
+def post_portfolio(payload: CreatePortfolioRequest, db: Session = Depends(get_db)):
+    try:
+        data = create_portfolio(db, payload.name, payload.base_currency)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio created",
+        data=data,
+    )
+
+
+@app.delete("/portfolios/{portfolio_id}", response_model=PortfolioProcessResponse)
+def delete_portfolio(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        soft_delete_portfolio(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio soft-deleted",
+        data={"portfolio_id": portfolio_id},
+    )
+
+
+@app.post("/portfolio/{portfolio_id}/import-csv", response_model=PortfolioProcessResponse)
+def import_portfolio_csv(
+    portfolio_id: str,
+    replace_existing: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    try:
+        data = import_transactions_from_csv_for_portfolio(db, portfolio_id, replace_existing=replace_existing)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio transactions imported from CSV",
+        data=data,
+    )
+
+
+@app.post("/portfolio/{portfolio_id}/process", response_model=PortfolioProcessResponse)
+async def process_portfolio_for_id(
+    portfolio_id: str,
+    strict: bool = Query(default=False, description="UI pass-through strict mode toggle; behavior unchanged."),
+    db: Session = Depends(get_db),
+):
+    try:
+        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id)
+        if isinstance(payload, dict):
+            payload["strict_mode_requested"] = bool(strict)
+        return PortfolioProcessResponse(
+            ok=True,
+            message="Portfolio processing completed",
+            data=payload,
+        )
+    except PortfolioEngineError as exc:
+        logger.exception("Portfolio processing failed")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/portfolios/{portfolio_id}/reprocess", response_model=PortfolioProcessResponse)
+async def reprocess_portfolio_for_id(
+    portfolio_id: str,
+    strict: bool = Query(default=False, description="UI pass-through strict mode toggle; behavior unchanged."),
+    db: Session = Depends(get_db),
+):
+    try:
+        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id)
+        if isinstance(payload, dict):
+            payload["strict_mode_requested"] = bool(strict)
+        return PortfolioProcessResponse(
+            ok=True,
+            message="Portfolio reprocessing completed",
+            data=payload,
+        )
+    except PortfolioEngineError as exc:
+        logger.exception("Portfolio reprocessing failed")
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/transactions", response_model=PortfolioProcessResponse)
+def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(get_db)):
+    try:
+        data = create_transaction(
+            db,
+            portfolio_id=payload.portfolio_id,
+            ticker=payload.ticker,
+            tx_type=payload.type,
+            quantity=payload.quantity,
+            price=payload.price,
+            trade_date=payload.date,
+            currency=payload.currency,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Transaction created", data=data)
+
+
+@app.put("/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
+def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: Session = Depends(get_db)):
+    try:
+        data = update_transaction(
+            db,
+            transaction_id=transaction_id,
+            ticker=payload.ticker,
+            tx_type=payload.type,
+            quantity=payload.quantity,
+            price=payload.price,
+            trade_date=payload.date,
+            currency=payload.currency,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Transaction updated", data=data)
+
+
+@app.delete("/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
+def delete_transaction(transaction_id: str, db: Session = Depends(get_db)):
+    try:
+        data = soft_delete_transaction(db, transaction_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return PortfolioProcessResponse(ok=True, message="Transaction soft-deleted", data=data)
+
+
+@app.get("/portfolios/{portfolio_id}/transactions", response_model=PortfolioProcessResponse)
+def get_transactions_for_portfolio(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        rows = list_transactions_for_portfolio(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio transactions loaded",
+        data={"transactions": rows},
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/last", response_model=PortfolioProcessResponse)
+def get_last_portfolio_process(portfolio_id: str):
+    data = load_last_portfolio_run(portfolio_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No saved portfolio run found.")
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Last saved portfolio run loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/runs/latest", response_model=PortfolioProcessResponse)
+def get_latest_portfolio_run_metadata(portfolio_id: str, db: Session = Depends(get_db)):
+    run = (
+        db.query(PortfolioProcessingRun)
+        .filter(PortfolioProcessingRun.portfolio_id == portfolio_id)
+        .order_by(PortfolioProcessingRun.finished_at.desc(), PortfolioProcessingRun.started_at.desc())
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="No portfolio processing run found.")
+
+    coverage_rows = (
+        db.query(PortfolioCoverageEvent)
+        .filter(
+            PortfolioCoverageEvent.run_id == run.id,
+            PortfolioCoverageEvent.portfolio_id == portfolio_id,
+            PortfolioCoverageEvent.warning_code == "coverage",
+        )
+        .order_by(PortfolioCoverageEvent.ticker.asc())
+        .all()
+    )
+    fallback_rows = (
+        db.query(PortfolioCoverageEvent)
+        .filter(
+            PortfolioCoverageEvent.run_id == run.id,
+            PortfolioCoverageEvent.portfolio_id == portfolio_id,
+            PortfolioCoverageEvent.warning_code == "prior_close_fallback",
+        )
+        .all()
+    )
+    correction_rows = (
+        db.query(PortfolioCorrectionEvent)
+        .filter(PortfolioCorrectionEvent.run_id == run.id, PortfolioCorrectionEvent.portfolio_id == portfolio_id)
+        .order_by(PortfolioCorrectionEvent.created_at.asc())
+        .all()
+    )
+
+    coverage_summary = [
+        {
+            "ticker": r.ticker,
+            "status": r.status,
+            "fallback_days": r.fallback_days or 0,
+            "first_missing_date": r.first_missing_date.isoformat() if r.first_missing_date else None,
+            "last_missing_date": r.last_missing_date.isoformat() if r.last_missing_date else None,
+            "coverage_start": r.coverage_start.isoformat() if r.coverage_start else None,
+            "coverage_end": r.coverage_end.isoformat() if r.coverage_end else None,
+        }
+        for r in coverage_rows
+    ]
+    correction_events = [
+        {
+            "ticker": r.ticker,
+            "event_type": r.reason,
+            "date": r.created_at.isoformat() if r.created_at else None,
+            "original_shares": r.requested_shares,
+            "corrected_shares": r.executed_shares,
+            "delta_pct": ((r.delta_shares / r.available_shares) * 100.0) if r.available_shares else None,
+            "triggered_by": "policy",
+            "run_id": r.run_id,
+        }
+        for r in correction_rows
+    ]
+    payload = {
+        "run_id": run.id,
+        "started_at": run.started_at.isoformat() + "Z" if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() + "Z" if run.finished_at else None,
+        "input_hash": run.hash_inputs,
+        "engine_version": run.engine_version,
+        "warnings_count": run.warnings_count,
+        "coverage_summary": coverage_summary,
+        "correction_event_count": len(correction_rows),
+        "fallback_count": len(fallback_rows),
+        "corrections": correction_events,
+    }
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Latest portfolio processing metadata loaded",
+        data=payload,
+    )
 
 
 @app.get("/tickers")
@@ -115,6 +495,37 @@ def delete_watchlist_ticker(ticker: str, db: Session = Depends(get_db)):
 def list_metrics(limit: int = 100, db: Session = Depends(get_db)):
     rows = db.scalars(select(Metrics).limit(limit)).all()
     return rows_to_dict(rows)
+
+
+@app.patch("/metrics/subjective/{ticker}")
+def patch_subjective_metrics(
+    ticker: str,
+    patch: MetricsSubjectivePatch,
+    db: Session = Depends(get_db),
+):
+    ticker_upper = ticker.strip().upper()
+    row = db.scalars(
+        select(Metrics)
+        .where(Metrics.ticker_symbol == ticker_upper)
+        .order_by(Metrics.updated_date.desc(), Metrics.created_date.desc())
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No metrics found for {ticker_upper}")
+
+    payload = patch.validated_payload()
+    if not payload:
+        raise HTTPException(status_code=400, detail="No subjective fields provided.")
+
+    for key, value in payload.items():
+        setattr(row, key, value)
+    row.updated_date = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(row)
+    return {
+        "ok": True,
+        "message": f"Subjective metrics updated for {ticker_upper}",
+        "data": {k: getattr(row, k) for k in payload.keys()},
+    }
 
 
 @app.get("/financials-history")
