@@ -7,6 +7,7 @@ import {
   Search, 
   Target, 
   Layers3,
+  Briefcase,
   Moon,
   Sun
 } from "lucide-react";
@@ -23,6 +24,7 @@ export default function Layout({ children, currentPageName }) {
     { name: "Screener", href: createPageUrl("Screener"), icon: Search },
     { name: "Lenses", href: createPageUrl("Lenses"), icon: Layers3 },
     { name: "Projection", href: createPageUrl("Projection"), icon: Target },
+    { name: "Portfolio", href: createPageUrl("Portfolio"), icon: Briefcase },
   ];
 
   const isActive = (href) => location.pathname === href;
