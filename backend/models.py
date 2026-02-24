@@ -394,3 +394,45 @@ class LedgerSnapshot(Base):
     cash: Mapped[float | None] = mapped_column(Float, nullable=True)
     input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PriceSnapshot(Base):
+    __tablename__ = "price_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    ticker: Mapped[str] = mapped_column(String, index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    as_of: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+
+class FXRateSnapshot(Base):
+    __tablename__ = "fx_rate_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    base_currency: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    quote_currency: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    rate: Mapped[float] = mapped_column(Float, nullable=False)
+    as_of: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+
+class ValuationSnapshot(Base):
+    __tablename__ = "valuation_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    ledger_snapshot_id: Mapped[str] = mapped_column(String, ForeignKey("ledger_snapshots.id"), index=True)
+    nav: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String, nullable=False)
+    as_of: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    components_json: Mapped[str | None] = mapped_column(Text, nullable=True)

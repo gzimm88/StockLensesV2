@@ -52,6 +52,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     list_portfolios,
     load_last_portfolio_run,
     rebuild_position_ledger,
+    rebuild_valuation_snapshot,
     run_portfolio_creation_flow,
     soft_delete_corporate_action,
     soft_delete_portfolio,
@@ -457,6 +458,29 @@ def post_rebuild_ledger_for_portfolio(portfolio_id: str, db: Session = Depends(g
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio ledger rebuilt",
+        data=data,
+    )
+
+
+@app.post("/portfolios/{portfolio_id}/rebuild-valuation", response_model=PortfolioProcessResponse)
+def post_rebuild_valuation_for_portfolio(
+    portfolio_id: str,
+    strict: bool = Query(default=False, description="Fail on stale price inputs when true."),
+    stale_trading_days: int = Query(default=3, ge=1, le=30),
+    db: Session = Depends(get_db),
+):
+    try:
+        data = rebuild_valuation_snapshot(
+            db,
+            portfolio_id,
+            strict=bool(strict),
+            stale_trading_days=int(stale_trading_days),
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio valuation rebuilt",
         data=data,
     )
 

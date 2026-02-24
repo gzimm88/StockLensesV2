@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -24,8 +25,12 @@ from backend.models import (
     PortfolioCoverageEvent,
     PortfolioProcessingRun,
     PortfolioTransaction,
+    PriceSnapshot,
+    PricesHistory,
     SecurityIdentity,
     SecuritySymbolMap,
+    FXRateSnapshot,
+    ValuationSnapshot,
 )
 from backend.normalizers import yahoo_normalizer
 from backend.repositories import prices_repo
@@ -1444,6 +1449,322 @@ def rebuild_position_ledger(db: Session, portfolio_id: str) -> dict[str, object]
         "cash": float(snapshot.cash or 0.0),
         "input_hash": snapshot.input_hash,
         "created_at": snapshot.created_at.isoformat() + "Z" if snapshot.created_at else None,
+    }
+
+
+def _trading_days_since(last_date: date, as_of_date: date) -> int:
+    if last_date >= as_of_date:
+        return 0
+    d = last_date
+    count = 0
+    while d < as_of_date:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            count += 1
+    return count
+
+
+def _latest_ledger_snapshot_or_error(db: Session, portfolio_id: str) -> LedgerSnapshot:
+    row = (
+        db.query(LedgerSnapshot)
+        .filter(LedgerSnapshot.portfolio_id == portfolio_id)
+        .order_by(LedgerSnapshot.ledger_version.desc())
+        .first()
+    )
+    if not row:
+        raise PortfolioEngineError(
+            f"No ledger snapshot found for portfolio '{portfolio_id}'. Run /portfolios/{{id}}/rebuild-ledger first."
+        )
+    return row
+
+
+def _ticker_currency_map_or_error(db: Session, portfolio_id: str) -> dict[str, str]:
+    rows = _sorted_active_transactions(db, portfolio_id)
+    currencies: dict[str, set[str]] = defaultdict(set)
+    for r in rows:
+        currencies[r.ticker_symbol_normalized].add((r.currency or "").strip().upper() or "USD")
+    out: dict[str, str] = {}
+    for ticker, values in currencies.items():
+        if len(values) > 1:
+            raise PortfolioEngineError(
+                f"Ticker {ticker} has mixed transaction currencies {sorted(values)}. Explicit currency normalization is required."
+            )
+        out[ticker] = next(iter(values))
+    return out
+
+
+def _price_hash(*, ticker: str, price: float, currency: str, source: str | None, as_of: date) -> str:
+    payload = {
+        "ticker": ticker,
+        "price": float(price),
+        "currency": currency,
+        "source": source or "prices_history",
+        "as_of": as_of.isoformat(),
+    }
+    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _fx_hash(*, base_currency: str, quote_currency: str, rate: float, source: str | None, as_of: date) -> str:
+    payload = {
+        "base_currency": base_currency,
+        "quote_currency": quote_currency,
+        "rate": float(rate),
+        "source": source or "prices_history",
+        "as_of": as_of.isoformat(),
+    }
+    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _resolve_price_snapshot(
+    db: Session,
+    *,
+    portfolio_id: str,
+    ticker: str,
+    currency: str,
+) -> PriceSnapshot:
+    row = (
+        db.query(PricesHistory)
+        .filter(PricesHistory.ticker == ticker)
+        .order_by(PricesHistory.date.desc())
+        .first()
+    )
+    if not row or row.close is None or row.date is None:
+        raise PortfolioEngineError(f"Missing price for ticker {ticker}.")
+    as_of_dt = datetime(row.date.year, row.date.month, row.date.day)
+    source = row.source or "prices_history"
+    price = float(row.close)
+    snap = PriceSnapshot(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        ticker=ticker,
+        price=price,
+        currency=currency,
+        source=source,
+        as_of=as_of_dt,
+        created_at=datetime.utcnow(),
+        input_hash=_price_hash(
+            ticker=ticker,
+            price=price,
+            currency=currency,
+            source=source,
+            as_of=row.date,
+        ),
+    )
+    db.add(snap)
+    return snap
+
+
+def _resolve_fx_rate_snapshot(
+    db: Session,
+    *,
+    portfolio_id: str,
+    base_currency: str,
+    quote_currency: str,
+) -> FXRateSnapshot:
+    direct = f"{quote_currency}{base_currency}=X"
+    inverse = f"{base_currency}{quote_currency}=X"
+
+    direct_row = (
+        db.query(PricesHistory)
+        .filter(PricesHistory.ticker == direct)
+        .order_by(PricesHistory.date.desc())
+        .first()
+    )
+    inverse_row = (
+        db.query(PricesHistory)
+        .filter(PricesHistory.ticker == inverse)
+        .order_by(PricesHistory.date.desc())
+        .first()
+    )
+
+    rate: float | None = None
+    as_of: date | None = None
+    source: str | None = None
+
+    if direct_row and direct_row.close is not None and direct_row.date is not None:
+        rate = float(direct_row.close)
+        as_of = direct_row.date
+        source = direct_row.source or "prices_history"
+    elif inverse_row and inverse_row.close and inverse_row.date is not None:
+        if float(inverse_row.close) == 0.0:
+            raise PortfolioEngineError(f"Invalid FX inverse rate for pair {inverse}.")
+        rate = 1.0 / float(inverse_row.close)
+        as_of = inverse_row.date
+        source = inverse_row.source or "prices_history"
+
+    if rate is None or as_of is None:
+        raise PortfolioEngineError(
+            f"Missing FX conversion from {quote_currency} to {base_currency}. Explicit FX snapshot is required."
+        )
+    if rate <= 0:
+        raise PortfolioEngineError(
+            f"Invalid FX conversion from {quote_currency} to {base_currency}. rate={rate}"
+        )
+
+    snap = FXRateSnapshot(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        rate=float(rate),
+        as_of=datetime(as_of.year, as_of.month, as_of.day),
+        source=source,
+        created_at=datetime.utcnow(),
+        input_hash=_fx_hash(
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            rate=float(rate),
+            source=source,
+            as_of=as_of,
+        ),
+    )
+    db.add(snap)
+    return snap
+
+
+def rebuild_valuation_snapshot(
+    db: Session,
+    portfolio_id: str,
+    *,
+    strict: bool = False,
+    stale_trading_days: int = 3,
+) -> dict[str, object]:
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    ledger = _latest_ledger_snapshot_or_error(db, portfolio_id)
+    holdings = json.loads(ledger.holdings_json or "{}")
+    if not isinstance(holdings, dict):
+        raise PortfolioEngineError("Invalid ledger snapshot holdings payload.")
+
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
+    base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+    valuation_date = date.today()
+
+    price_snaps: list[PriceSnapshot] = []
+    fx_snaps: list[FXRateSnapshot] = []
+    fx_by_quote: dict[str, FXRateSnapshot] = {}
+    stale_tickers: list[str] = []
+    excluded_tickers: list[str] = []
+    components: list[dict[str, object]] = []
+    nav = Decimal("0")
+
+    sorted_tickers = sorted((str(k).upper(), float(v)) for k, v in holdings.items() if float(v) > 0.0)
+    for ticker, qty_float in sorted_tickers:
+        currency = ticker_currency.get(ticker, base_currency)
+        price_snap = _resolve_price_snapshot(
+            db,
+            portfolio_id=portfolio_id,
+            ticker=ticker,
+            currency=currency,
+        )
+        price_snaps.append(price_snap)
+
+        stale_days = _trading_days_since(price_snap.as_of.date(), valuation_date)
+        is_stale = stale_days > int(stale_trading_days)
+        if is_stale:
+            stale_tickers.append(ticker)
+            if strict:
+                raise PortfolioEngineError(
+                    f"Stale price for {ticker}: {price_snap.as_of.date().isoformat()} ({stale_days} trading days old)."
+                )
+            excluded_tickers.append(ticker)
+            components.append(
+                {
+                    "ticker": ticker,
+                    "quantity": qty_float,
+                    "price": price_snap.price,
+                    "currency": currency,
+                    "included": False,
+                    "reason": "stale_price",
+                    "stale_trading_days": stale_days,
+                }
+            )
+            continue
+
+        fx_rate = Decimal("1")
+        fx_source = None
+        fx_as_of = None
+        if currency != base_currency:
+            fx = fx_by_quote.get(currency)
+            if fx is None:
+                fx = _resolve_fx_rate_snapshot(
+                    db,
+                    portfolio_id=portfolio_id,
+                    base_currency=base_currency,
+                    quote_currency=currency,
+                )
+                fx_by_quote[currency] = fx
+                fx_snaps.append(fx)
+            fx_rate = Decimal(str(fx.rate))
+            fx_source = fx.source
+            fx_as_of = fx.as_of.date().isoformat()
+
+        qty = Decimal(str(qty_float))
+        price = Decimal(str(price_snap.price))
+        position_value = (qty * price * fx_rate).quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP)
+        nav += position_value
+        components.append(
+            {
+                "ticker": ticker,
+                "quantity": float(qty),
+                "price": float(price),
+                "currency": currency,
+                "included": True,
+                "fx_rate": float(fx_rate),
+                "fx_source": fx_source,
+                "fx_as_of": fx_as_of,
+                "value_base": float(position_value),
+            }
+        )
+
+    valuation_hash_payload = {
+        "ledger_input_hash": ledger.input_hash,
+        "price_hashes": sorted(s.input_hash for s in price_snaps),
+        "fx_hashes": sorted(s.input_hash for s in fx_snaps),
+        "base_currency": base_currency,
+        "strict": bool(strict),
+        "stale_trading_days": int(stale_trading_days),
+        "excluded_tickers": sorted(excluded_tickers),
+    }
+    valuation_input_hash = hashlib.sha256(
+        json.dumps(valuation_hash_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    as_of_candidates = [s.as_of for s in price_snaps] + [s.as_of for s in fx_snaps]
+    as_of = max(as_of_candidates) if as_of_candidates else datetime.utcnow()
+    now = datetime.utcnow()
+    nav_float = float(nav.quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP))
+    snapshot = ValuationSnapshot(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        ledger_snapshot_id=ledger.id,
+        nav=nav_float,
+        currency=base_currency,
+        as_of=as_of,
+        created_at=now,
+        input_hash=valuation_input_hash,
+        components_json=json.dumps(components, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+
+    return {
+        "valuation_snapshot_id": snapshot.id,
+        "portfolio_id": portfolio_id,
+        "ledger_snapshot_id": ledger.id,
+        "nav": snapshot.nav,
+        "currency": snapshot.currency,
+        "as_of": snapshot.as_of.isoformat() + "Z",
+        "input_hash": snapshot.input_hash,
+        "strict": bool(strict),
+        "stale_threshold_trading_days": int(stale_trading_days),
+        "stale_tickers": sorted(stale_tickers),
+        "excluded_tickers": sorted(excluded_tickers),
+        "price_snapshot_count": len(price_snaps),
+        "fx_snapshot_count": len(fx_snaps),
+        "components": components,
     }
 
 
