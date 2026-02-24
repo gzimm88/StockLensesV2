@@ -147,6 +147,40 @@ async def fetch_5y_prices(ticker: str, client: Any) -> dict[str, Any]:
     return result
 
 
+async def fetch_prices_range(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    client: Any,
+) -> dict[str, Any]:
+    """
+    Fetch daily history for an explicit date range.
+    `end_date` is expected as exclusive (Yahoo/yfinance semantics).
+    """
+    import yfinance as yf
+
+    logger.info(
+        "[yfinance] Fetching range prices for %s (start=%s end=%s)",
+        ticker,
+        start_date,
+        end_date,
+    )
+    t = yf.Ticker(ticker)
+    hist = t.history(
+        start=start_date,
+        end=end_date,
+        auto_adjust=False,
+        actions=False,
+    )
+    result = _history_to_chart_result(ticker, hist)
+    logger.info(
+        "[yfinance] Got %d price points for %s (range)",
+        len(result["timestamp"]),
+        ticker,
+    )
+    return result
+
+
 async def fetch_recent_prices(ticker: str, client: Any) -> dict[str, Any]:
     """Fetch 1-month recent daily price history via yfinance. Returns chart result dict."""
     import yfinance as yf

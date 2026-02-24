@@ -5,4 +5,8 @@ export const lensRec = {
   "Asymmetry Hunter": { buy: 6.5, watch: 4.5, mos: 60, conf: 20 },
   "Macro-Thematic": { buy: 6.5, watch: 4.5, mos: 60, conf: 20 },
   "Quality Compounder": { buy: 6.5, watch: 4.5, mos: 60, conf: 20 },
+  // Famous investor lenses
+  "Warren Buffett":     { buy: 6.5, watch: 4.5 },
+  "Benjamin Graham":    { buy: 6.5, watch: 4.5 },
+  "Peter Lynch":        { buy: 6.5, watch: 4.5 },
 };

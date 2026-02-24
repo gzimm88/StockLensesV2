@@ -114,6 +114,53 @@ def upsert_prices(
     return {"inserted": total_inserted, "updated": total_updated, "skipped": total_skipped}
 
 
+def insert_missing_prices(
+    db: Session,
+    prices: list[dict[str, Any]],
+) -> dict[str, int]:
+    """
+    Insert only missing (ticker, date) rows; never update existing rows.
+    Returns {"inserted": N, "updated": 0, "skipped": N}.
+    """
+    if not prices:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+
+    ticker = prices[0]["ticker"]
+    batches = [prices[i: i + BATCH_SIZE] for i in range(0, len(prices), BATCH_SIZE)]
+    total_inserted = 0
+    total_skipped = 0
+
+    for i, batch in enumerate(batches):
+        dates = [p["date"] for p in batch]
+        try:
+            existing_rows = db.scalars(
+                select(PricesHistory).where(
+                    and_(
+                        PricesHistory.ticker == ticker,
+                        PricesHistory.date.in_(dates),
+                    )
+                )
+            ).all()
+            existing_dates = {str(r.date) for r in existing_rows}
+            to_insert = [p for p in batch if str(p["date"]) not in existing_dates]
+            skipped = len(batch) - len(to_insert)
+
+            if to_insert:
+                _bulk_insert_with_retry(db, to_insert, i + 1)
+            db.commit()
+            total_inserted += len(to_insert)
+            total_skipped += skipped
+        except Exception:
+            db.rollback()
+            total_skipped += len(batch)
+
+        if i < len(batches) - 1:
+            import time
+            time.sleep(INTER_BATCH_DELAY_S)
+
+    return {"inserted": total_inserted, "updated": 0, "skipped": total_skipped}
+
+
 def _bulk_insert_with_retry(
     db: Session,
     rows: list[dict[str, Any]],
