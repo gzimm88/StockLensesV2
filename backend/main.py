@@ -11,7 +11,11 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — set FINNHUB_API_KEY in the shell
 
+
 from fastapi import Depends, FastAPI, HTTPException, Query
+
+from fastapi import Depends, FastAPI, HTTPException
+
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -90,6 +94,7 @@ def _ensure_metrics_schema() -> None:
 _ensure_metrics_schema()
 
 
+
 def _ensure_phase1_schema() -> None:
     with engine.begin() as conn:
         run_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_processing_runs)"))}
@@ -137,6 +142,7 @@ def _bootstrap_default_portfolio() -> None:
 
 
 _bootstrap_default_portfolio()
+
 
 
 def rows_to_dict(rows):

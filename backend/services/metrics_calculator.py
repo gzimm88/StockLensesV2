@@ -635,10 +635,17 @@ def run_deterministic_pipeline(
         eps_ttm,
     )
 
+
     # Forward EPS policy (Phase 1.2 — metric_resolver):
     # consensus next-12-month EPS only (from quote endpoint ingest into metrics.eps_forward)
     # Never derived from CAGR projection. Validated via metric_resolver.
     eps_forward_raw = (existing_metrics or {}).get("eps_forward") if isinstance(existing_metrics, dict) else None
+
+    # Forward EPS policy:
+    # consensus next-12-month EPS only (from quote endpoint ingest into metrics.eps_forward)
+    eps_forward_raw = (existing_metrics or {}).get("eps_forward") if isinstance(existing_metrics, dict) else None
+    eps_forward = eps_forward_raw if _is_num(eps_forward_raw) and eps_forward_raw > 0 else None
+
 
     logger.info(
         "[EPS_TRACE] %s eps_forward_field=metrics.eps_forward(consensus_ntm_quote) eps_forward_raw=%s",
@@ -646,8 +653,20 @@ def run_deterministic_pipeline(
         eps_forward_raw,
     )
 
+
     # Use centralized validator from metric_resolver
     eps_forward = validate_eps_forward(eps_forward_raw, eps_ttm, ticker=ticker)
+
+    # Validation guard: forward EPS should not be wildly above TTM EPS.
+    if _is_num(eps_forward) and _is_num(eps_ttm) and eps_ttm > 0 and eps_forward > 3 * eps_ttm:
+        logger.warning(
+            "[EPS_TRACE] %s invalid eps_forward=%s (>3x eps_ttm=%s). Dropping eps_forward for pe_fwd computation.",
+            ticker,
+            eps_forward,
+            eps_ttm,
+        )
+        eps_forward = None
+
 
     # Deterministic forward PE = current price / forward EPS (no API-provided PE)
     pe_fwd = None

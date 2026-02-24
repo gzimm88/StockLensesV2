@@ -684,8 +684,10 @@ export default function Screener() {
   const [traceDrawerData, setTraceDrawerData] = useState(null);
   const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [minScoreFilter, setMinScoreFilter] = useState(0);
+
   const [buyMin, setBuyMin]     = useState(6.5);
   const [watchMin, setWatchMin] = useState(4.5);
+
   const [isBulkUpdating, setIsBulkUpdating] = useState(false);
   const [bulkUpdateStatus, setBulkUpdateStatus] = useState(null);
   const [activeTab, setActiveTab] = useState("results");
@@ -749,11 +751,24 @@ export default function Screener() {
       const mos = getLatestMosForTicker(ticker.symbol);
       const lensConfig = lensRec[selectedLens.name] || lensRec["Conservative"];
 
+
       const confidence = calculateConfidencePct(metric);
       const { rec } = recommend(finalScore, {
         buy: buyMin,
         watch: watchMin,
       });
+
+
+      
+      const confidence = calculateConfidencePct(metric);
+      const { rec, mosStatus, confStatus } = recommend(finalScore, mos, {
+        buy: lensConfig.buy,
+        watch: lensConfig.watch,
+        mos: lensConfig.mos,
+        conf: lensConfig.conf,
+        confidence,
+      });
+      
 
       return {
         ticker,
@@ -761,7 +776,12 @@ export default function Screener() {
         scores,
         finalScore,
         recommendation: rec,
+
         mosSig: mosSignal(mos),
+
+        mosStatus: mosStatus,
+        confStatus,
+
         confidence,
         mos,
       };
@@ -824,7 +844,11 @@ export default function Screener() {
     
     const headers = [
       'symbol', 'name', 'lens', 'recommendation', 'finalScore',
+
       'buy_threshold', 'watch_threshold', 'mos_signal', 'mos_value', 'confidence_value', 'pe_low', 'pe_high', 'pe_ttm',
+
+      'buy_threshold', 'watch_threshold', 'mos_threshold', 'conf_threshold', 'mos_value', 'confidence_value', 'pe_low', 'pe_high', 'pe_ttm',
+
       'pe_band_source',
       ...Object.keys(enrichedData[0].scores),
       'exportedAt',
@@ -842,7 +866,12 @@ export default function Screener() {
         item.finalScore.toFixed(2),
         lensConfig.buy || 6.5,
         lensConfig.watch || 4.5,
+
         item.mosSig ?? '',
+
+        lensConfig.mos || 0,
+        lensConfig.conf || 0,
+
         item.mos != null ? (item.mos * 100).toFixed(1) + '%' : 'N/A',
         `${item.confidence.toFixed(1)}%`,
         low ?? '',
@@ -896,6 +925,7 @@ export default function Screener() {
     setTraceDrawerOpen(true);
   };
 
+
   const handleSaveSubjectiveMetrics = async (symbol, payload) => {
     const res = await fetch(`/api/metrics/subjective/${encodeURIComponent(normalizeSymbol(symbol))}`, {
       method: "PATCH",
@@ -928,6 +958,7 @@ export default function Screener() {
       };
     });
   };
+
 
   const addOnboardingRun = (run, source = "manual") => {
     if (!run?.ticker) return;
@@ -1271,11 +1302,17 @@ export default function Screener() {
                             />
                         </div>
                     </div>
+
                     <ThresholdSlider
                         buyMin={buyMin}
                         watchMin={watchMin}
                         onChange={(w, b) => { setWatchMin(w); setBuyMin(b); }}
                     />
+
+                    <div className="text-xs text-slate-500 bg-white px-2 py-1 rounded border">
+                        Buy ≥{(lensConfig.buy || 6.5).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
+                    </div>
+
                 </div>
             )}
           </CardContent>
@@ -1377,6 +1414,7 @@ export default function Screener() {
                                                 <Badge className={`${getRecommendationBadge(item.recommendation)} font-semibold text-xs cursor-help`}>
                                                     {item.recommendation}
                                                 </Badge>
+
                                                 {item.mos != null && (
                                                     <Badge variant="outline" className="text-xs px-1.5 py-0.5 font-mono">
                                                         {item.mos >= 0 ? "+" : ""}{(item.mos * 100).toFixed(0)}%
@@ -1385,17 +1423,35 @@ export default function Screener() {
                                                 <Badge variant="outline" className="text-xs px-1.5 py-0.5">
                                                     Conf ✓
                                                 </Badge>
+
+                                                {item.mosStatus && (
+                                                    <Badge variant="outline" className="text-xs px-1.5 py-0.5">{item.mosStatus}</Badge>
+                                                )}
+                                                {item.confStatus && (
+                                                    <Badge variant="outline" className="text-xs px-1.5 py-0.5">
+                                                      Conf {item.confStatus}
+                                                    </Badge>
+                                                )}
+
                                             </div>
                                         </TooltipTrigger>
                                         <TooltipContent>
                                             <div className="text-xs">
                                                 <p className="font-semibold">Based on {selectedLens.name}</p>
                                                 {lensConfig && (
+
                                                     <p>Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}</p>
                                                 )}
                                                 {item.mos != null && (
                                                     <p className="mt-1 text-slate-600">
                                                         MOS signal: {item.mosSig} ({(item.mos * 100).toFixed(1)}%)
+
+                                                    <p>Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}</p>
+                                                )}
+                                                {item.mos !== null && (
+                                                    <p className="mt-1 text-slate-600">
+                                                        Current MOS: {(item.mos * 100).toFixed(1)}%
+
                                                     </p>
                                                 )}
                                                 <p className="mt-1 text-slate-600">
@@ -1410,7 +1466,11 @@ export default function Screener() {
                               <TooltipProvider>
                                 <Tooltip delayDuration={100}>
                                     <TooltipTrigger asChild>
+
                                         <Badge className={`font-mono ${getScoreColor(item.finalScore, buyMin, watchMin)}`}>
+
+                                        <Badge className={`font-mono ${getScoreColor(item.finalScore)}`}>
+
                                             {item.finalScore.toFixed(2)}
                                         </Badge>
                                     </TooltipTrigger>
@@ -1421,7 +1481,11 @@ export default function Screener() {
                             {Object.keys(item.scores).filter(k => ["valuation", "quality", "capitalAllocation", "growth", "moat", "risk"].includes(k)).map((key) => (
                               <TableCell key={key} className="text-center">
                                 <span className={`px-2 py-1 rounded text-xs font-medium ${
+
                                   item.scores[key] != null ? getScoreColor(item.scores[key], buyMin, watchMin) : 'text-slate-400'
+
+                                  item.scores[key] != null ? getScoreColor(item.scores[key]) : 'text-slate-400'
+
                                 }`}>
                                   {item.scores[key] != null ? item.scores[key].toFixed(1) : '--'}
                                 </span>

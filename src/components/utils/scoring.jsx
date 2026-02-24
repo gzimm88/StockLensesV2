@@ -126,6 +126,7 @@ function scoreCapitalAllocation(m) {
 //   NEW: w-avg(8, 8, 5.65, 7) = 7.50  ← appropriate for 16% EPS CAGR at scale
 function scoreGrowth(m) {
     const eps5yRaw = toPoints(m.eps_cagr_5y_pct);
+
     const rev5yRaw = toPoints(m.revenue_cagr_5y_pct ?? m.rev_cagr_5y_pct);
     const eps3yRaw = toPoints(m.eps_cagr_3y_pct);
     const rev3yRaw = toPoints(m.revenue_cagr_3y_pct ?? m.rev_cagr_3y_pct);
@@ -159,6 +160,29 @@ function scoreGrowth(m) {
 
     // Weighted: EPS5Y 40% · Rev5Y 30% · Acceleration 15% · Durability 15%
     return weightedAvg([sub_eps5, sub_rev5, acceleration, sub_rec], [0.40, 0.30, 0.15, 0.15]);
+
+    const eps5y = eps5yRaw == null ? null : cap10(eps5yRaw / 2);
+    const rev5yRaw = toPoints(m.revenue_cagr_5y_pct ?? m.rev_cagr_5y_pct);
+    const rev3yRaw = toPoints(m.revenue_cagr_3y_pct ?? m.rev_cagr_3y_pct);
+    const rev5y = rev5yRaw == null ? null : cap10(rev5yRaw / 2);
+    const acceleration = (() => {
+        const eps3yRaw = toPoints(m.eps_cagr_3y_pct);
+        const eps5yRaw = toPoints(m.eps_cagr_5y_pct);
+        if (eps3yRaw == null || eps5yRaw == null || rev3yRaw == null || rev5yRaw == null) return null;
+        const acc = (eps3yRaw - eps5yRaw) + (rev3yRaw - rev5yRaw);
+        if (!Number.isFinite(acc)) return null;
+        return cap10(5 + 0.5 * acc);
+    })();
+    const stage_tag = (() => {
+        const r = rev5yRaw;
+        if (r == null) return null;
+        if (r >= 25) return 10;
+        if (r >= 15) return 8;
+        if (r >= 5) return 6;
+        return 3;
+    })();
+    return safeAvg([eps5y, rev5y, acceleration, stage_tag]);
+
 }
 
 // E) Moat — CALIBRATED

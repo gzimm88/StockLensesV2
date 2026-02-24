@@ -456,6 +456,7 @@ async def run_full_onboard(
         except Exception as exc:
             result.step_failed("F:price_metrics", str(exc))
 
+
         # Step G: Compute Score Snapshots for all lens presets (Phase 3)
         result.log("[Step G] Computing ScoreSnapshots for all lens presets...")
         try:
@@ -503,6 +504,7 @@ async def run_full_onboard(
             result.log(f"[Step G] {snapshot_count} ScoreSnapshot(s) persisted for {ticker}")
         except Exception as exc:
             result.step_failed("G:score_snapshots", str(exc))
+
 
         # Final debug snapshot for traceability in UI log tab
         try:
