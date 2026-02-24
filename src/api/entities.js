@@ -9,7 +9,7 @@
  * Errors bubble up as thrown Error instances so callers can catch them.
  */
 
-const BASE = "http://localhost:8000";
+const BASE = "/api";
 
 async function apiFetch(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {

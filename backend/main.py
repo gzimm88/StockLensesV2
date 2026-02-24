@@ -43,12 +43,16 @@ from backend.orchestrator.onboarding_orchestrator import (
 )
 from backend.orchestrator.portfolio_orchestrator import (
     create_portfolio,
+    create_portfolio_transaction,
     get_or_create_default_portfolio,
     import_transactions_from_csv_for_portfolio,
     list_portfolios,
+    list_portfolio_transactions,
     load_last_portfolio_run,
     run_portfolio_creation_flow,
+    soft_delete_portfolio_transaction,
     soft_delete_portfolio,
+    update_portfolio_transaction,
 )
 from backend.repositories import financials_repo, metrics_repo, prices_repo
 from backend.services.portfolio_engine import PortfolioEngineError
@@ -153,6 +157,16 @@ class CreatePortfolioRequest(BaseModel):
     base_currency: str = "USD"
 
 
+class TransactionRequest(BaseModel):
+    ticker: str
+    type: str
+    trade_date: str
+    shares: float | None = None
+    price: float
+    currency: str = "USD"
+    note: str | None = None
+
+
 class MetricsSubjectivePatch(BaseModel):
     moat_score_0_10: float | None = None
     riskdownside_score_0_10: float | None = None
@@ -236,6 +250,92 @@ def import_portfolio_csv(
         ok=True,
         message="Portfolio transactions imported from CSV",
         data=data,
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/transactions", response_model=PortfolioProcessResponse)
+def get_portfolio_transactions(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        txs = list_portfolio_transactions(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio transactions loaded",
+        data={"transactions": txs},
+    )
+
+
+@app.post("/portfolio/{portfolio_id}/transactions", response_model=PortfolioProcessResponse)
+def post_portfolio_transaction(
+    portfolio_id: str,
+    payload: TransactionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        tx = create_portfolio_transaction(
+            db,
+            portfolio_id,
+            ticker=payload.ticker,
+            tx_type=payload.type,
+            trade_date=payload.trade_date,
+            shares=payload.shares,
+            price=payload.price,
+            currency=payload.currency,
+            note=payload.note,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Transaction created. Reprocess required to refresh metrics.",
+        data={"transaction": tx, "reprocess_required": True},
+    )
+
+
+@app.put("/portfolio/{portfolio_id}/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
+def put_portfolio_transaction(
+    portfolio_id: str,
+    transaction_id: str,
+    payload: TransactionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        tx = update_portfolio_transaction(
+            db,
+            portfolio_id,
+            transaction_id,
+            ticker=payload.ticker,
+            tx_type=payload.type,
+            trade_date=payload.trade_date,
+            shares=payload.shares,
+            price=payload.price,
+            currency=payload.currency,
+            note=payload.note,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Transaction updated via soft-delete + recreate. Reprocess required.",
+        data={"transaction": tx, "reprocess_required": True},
+    )
+
+
+@app.delete("/portfolio/{portfolio_id}/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
+def delete_portfolio_transaction(
+    portfolio_id: str,
+    transaction_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        soft_delete_portfolio_transaction(db, portfolio_id, transaction_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Transaction soft-deleted. Reprocess required.",
+        data={"transaction_id": transaction_id, "reprocess_required": True},
     )
 
 

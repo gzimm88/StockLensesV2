@@ -62,3 +62,27 @@ export async function getLatestPortfolioRunMetadata(portfolioId) {
     throw err;
   }
 }
+
+export function listPortfolioTransactions(portfolioId) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" });
+}
+
+export function createPortfolioTransaction(portfolioId, payload) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updatePortfolioTransaction(portfolioId, transactionId, payload) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deletePortfolioTransaction(portfolioId, transactionId) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
+    method: "DELETE",
+  });
+}

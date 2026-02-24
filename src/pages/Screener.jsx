@@ -129,10 +129,54 @@ const ScoreTooltipContent = ({ scores, lens }) => (
     </div>
 );
 
-const StockDetailDrawer = ({ ticker, metrics }) => {
+const StockDetailDrawer = ({ ticker, metrics, onSaveSubjective }) => {
   if (!ticker || !metrics) return null;
 
   const scores = computeCategoryScores(metrics);
+  const [form, setForm] = useState({
+    moat_score_0_10: metrics.moat_score_0_10 ?? "",
+    riskdownside_score_0_10: metrics.riskdownside_score_0_10 ?? "",
+    macrofit_score_0_10: metrics.macrofit_score_0_10 ?? "",
+    narrative_score_0_10: metrics.narrative_score_0_10 ?? "",
+    founder_led_bool: !!metrics.founder_led_bool,
+  });
+  const [saveState, setSaveState] = useState({ loading: false, error: "", ok: "" });
+
+  useEffect(() => {
+    setForm({
+      moat_score_0_10: metrics.moat_score_0_10 ?? "",
+      riskdownside_score_0_10: metrics.riskdownside_score_0_10 ?? "",
+      macrofit_score_0_10: metrics.macrofit_score_0_10 ?? "",
+      narrative_score_0_10: metrics.narrative_score_0_10 ?? "",
+      founder_led_bool: !!metrics.founder_led_bool,
+    });
+    setSaveState({ loading: false, error: "", ok: "" });
+  }, [ticker?.symbol, metrics]);
+
+  const parseScore = (value, label) => {
+    if (value === "") return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) throw new Error(`${label} must be numeric.`);
+    if (n < 0 || n > 10) throw new Error(`${label} must be between 0 and 10.`);
+    return n;
+  };
+
+  const handleSave = async () => {
+    setSaveState({ loading: true, error: "", ok: "" });
+    try {
+      const payload = {
+        moat_score_0_10: parseScore(form.moat_score_0_10, "Moat score"),
+        riskdownside_score_0_10: parseScore(form.riskdownside_score_0_10, "Risk score"),
+        macrofit_score_0_10: parseScore(form.macrofit_score_0_10, "Macro fit score"),
+        narrative_score_0_10: parseScore(form.narrative_score_0_10, "Narrative score"),
+        founder_led_bool: !!form.founder_led_bool,
+      };
+      await onSaveSubjective(ticker.symbol, payload);
+      setSaveState({ loading: false, error: "", ok: "Saved subjective scores." });
+    } catch (err) {
+      setSaveState({ loading: false, error: err.message || "Failed to save.", ok: "" });
+    }
+  };
 
   const breakdownDetails = {
       Valuation: {
@@ -222,6 +266,74 @@ const StockDetailDrawer = ({ ticker, metrics }) => {
         <p className="text-sm text-slate-500">Scoring components breakdown</p>
       </SheetHeader>
       <div className="py-4 space-y-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Editable Subjective Inputs</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Moat Score (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.moat_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, moat_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Risk Score (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.riskdownside_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, riskdownside_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Macro Fit (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.macrofit_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, macrofit_score_0_10: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Narrative (0-10)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={form.narrative_score_0_10}
+                  onChange={(e) => setForm((prev) => ({ ...prev, narrative_score_0_10: e.target.value }))}
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={form.founder_led_bool}
+                onChange={(e) => setForm((prev) => ({ ...prev, founder_led_bool: e.target.checked }))}
+              />
+              Founder-led
+            </label>
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSave} disabled={saveState.loading}>
+                {saveState.loading ? "Saving..." : "Save Subjective Scores"}
+              </Button>
+              {saveState.ok && <span className="text-sm text-green-700">{saveState.ok}</span>}
+              {saveState.error && <span className="text-sm text-red-600">{saveState.error}</span>}
+            </div>
+          </CardContent>
+        </Card>
         {Object.entries(breakdownDetails).map(([name, data]) => (
             <ScoreBreakdown key={name} name={name} score={data.score} details={data.details} />
         ))}
@@ -782,6 +894,39 @@ export default function Screener() {
     event.stopPropagation();
     setTraceDrawerData({ ticker: item.ticker, metrics: item.metrics, lens: selectedLens });
     setTraceDrawerOpen(true);
+  };
+
+  const handleSaveSubjectiveMetrics = async (symbol, payload) => {
+    const res = await fetch(`/api/metrics/subjective/${encodeURIComponent(normalizeSymbol(symbol))}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.detail ?? `HTTP ${res.status}`);
+    }
+
+    setMetrics((prev) =>
+      prev.map((m) => {
+        if (normalizeSymbol(m?.ticker_symbol) !== normalizeSymbol(symbol)) {
+          return m;
+        }
+        return { ...m, ...data?.data };
+      })
+    );
+    setDetailTicker((prev) => {
+      if (!prev?.ticker?.symbol || normalizeSymbol(prev.ticker.symbol) !== normalizeSymbol(symbol)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        metrics: {
+          ...prev.metrics,
+          ...data?.data,
+        },
+      };
+    });
   };
 
   const addOnboardingRun = (run, source = "manual") => {
@@ -1389,7 +1534,13 @@ export default function Screener() {
           </TabsContent>
         </Tabs>
       </div>
-      {detailTicker && <StockDetailDrawer ticker={detailTicker.ticker} metrics={detailTicker.metrics} />}
+      {detailTicker && (
+        <StockDetailDrawer
+          ticker={detailTicker.ticker}
+          metrics={detailTicker.metrics}
+          onSaveSubjective={handleSaveSubjectiveMetrics}
+        />
+      )}
       {traceDrawerData && (
         <ScoreTraceDrawer
           ticker={traceDrawerData.ticker}

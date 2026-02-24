@@ -114,6 +114,38 @@ def upsert_prices(
     return {"inserted": total_inserted, "updated": total_updated, "skipped": total_skipped}
 
 
+def insert_missing_prices(
+    db: Session,
+    prices: list[dict[str, Any]],
+) -> dict[str, int]:
+    """
+    Insert only missing PricesHistory rows (idempotent, no updates).
+    Returns {"inserted": N, "updated": 0, "skipped": N}.
+    """
+    if not prices:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+
+    ticker = prices[0]["ticker"]
+    dates = [p["date"] for p in prices]
+    existing_rows = db.scalars(
+        select(PricesHistory).where(
+            and_(
+                PricesHistory.ticker == ticker,
+                PricesHistory.date.in_(dates),
+            )
+        )
+    ).all()
+    existing_dates = {str(r.date) for r in existing_rows}
+
+    to_insert = [p for p in prices if str(p["date"]) not in existing_dates]
+    if not to_insert:
+        return {"inserted": 0, "updated": 0, "skipped": len(prices)}
+
+    _bulk_insert_with_retry(db, to_insert, batch_num=1)
+    db.commit()
+    return {"inserted": len(to_insert), "updated": 0, "skipped": len(prices) - len(to_insert)}
+
+
 def _bulk_insert_with_retry(
     db: Session,
     rows: list[dict[str, Any]],
@@ -200,3 +232,17 @@ def get_latest_price(db: Session, ticker: str) -> float | None:
         .limit(1)
     ).first()
     return row.close if row else None
+
+
+def get_price_date_bounds(db: Session, ticker: str) -> tuple[date | None, date | None]:
+    """
+    Return (min_date, max_date) for a ticker.
+    """
+    rows = db.scalars(
+        select(PricesHistory.date)
+        .where(PricesHistory.ticker == ticker)
+        .order_by(PricesHistory.date.asc())
+    ).all()
+    if not rows:
+        return (None, None)
+    return (rows[0], rows[-1])

@@ -1,0 +1,2 @@
+ticker,ticker_symbol,sell_date,sell_row_id,lot_id,matched_shares,entry_date,entry_price,sell_price,entry_fx,sell_fx,local_realized,fx_realized,total_realized
+AAPL,AAPL,OPEN,,1,8.0,2026-02-01,100.0,264.5799865722656,1.0,1.0,,,

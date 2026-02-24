@@ -177,6 +177,37 @@ def _run_cache_path(portfolio_id: str) -> Path:
     return RUN_CACHE_DIR / f"last_portfolio_run_{safe}.json"
 
 
+def _normalize_ticker_input(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    return raw.split(":")[-1].strip().upper()
+
+
+def _validate_tx_type(tx_type: str) -> str:
+    clean = (tx_type or "").strip()
+    if clean not in {"Buy", "Sell", "Dividend"}:
+        raise PortfolioEngineError("Invalid transaction type. Allowed: Buy, Sell, Dividend.")
+    return clean
+
+
+def _validate_trade_date(raw_date: str) -> date:
+    try:
+        return date.fromisoformat(str(raw_date))
+    except Exception as exc:
+        raise PortfolioEngineError("trade_date must be in YYYY-MM-DD format.") from exc
+
+
+def _validate_positive_number(name: str, value: object) -> float:
+    try:
+        out = float(value)
+    except Exception as exc:
+        raise PortfolioEngineError(f"{name} must be numeric.") from exc
+    if out <= 0:
+        raise PortfolioEngineError(f"{name} must be > 0.")
+    return out
+
+
 def _tx_stats(transactions: list[Transaction]) -> dict[str, dict[str, object]]:
     stats: dict[str, dict[str, object]] = {}
     grouped: dict[str, list[Transaction]] = defaultdict(list)
@@ -574,11 +605,11 @@ def export_prices_for_engine(
 
 def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -> str:
     exchange, normalized_symbol, vendor_symbol = _split_source_symbol(raw_symbol, ticker)
-    sec_id = _security_id(normalized_symbol, exchange)
     now = datetime.utcnow()
 
-    ident = db.query(SecurityIdentity).filter(SecurityIdentity.security_id == sec_id).first()
+    ident = db.query(SecurityIdentity).filter(SecurityIdentity.normalized_symbol == normalized_symbol).first()
     if ident is None:
+        sec_id = _security_id(normalized_symbol, exchange)
         ident = SecurityIdentity(
             security_id=sec_id,
             normalized_symbol=normalized_symbol,
@@ -591,7 +622,11 @@ def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -
         )
         db.add(ident)
     else:
+        sec_id = ident.security_id
         ident.updated_at = now
+        if not ident.exchange and exchange:
+            ident.exchange = exchange
+            ident.mic = exchange
         ident.vendor_symbol = ident.vendor_symbol or vendor_symbol
         ident.raw_symbol_example = ident.raw_symbol_example or (raw_symbol or ticker)
 
@@ -795,6 +830,227 @@ def _load_portfolio_transactions_from_db(db: Session, portfolio_id: str) -> list
         )
         seq += 1
     return out
+
+
+def list_portfolio_transactions(db: Session, portfolio_id: str) -> list[dict[str, object]]:
+    get_portfolio_or_error(db, portfolio_id)
+    rows = (
+        db.query(PortfolioTransaction)
+        .filter(PortfolioTransaction.portfolio_id == portfolio_id, PortfolioTransaction.is_deleted == False)
+        .order_by(PortfolioTransaction.trade_date.asc(), PortfolioTransaction.id.asc())
+        .all()
+    )
+    out: list[dict[str, object]] = []
+    for r in rows:
+        note = None
+        if r.metadata_json:
+            try:
+                note = json.loads(r.metadata_json).get("note")
+            except Exception:
+                note = None
+        out.append(
+            {
+                "id": r.id,
+                "portfolio_id": r.portfolio_id,
+                "ticker": r.ticker_symbol_normalized,
+                "ticker_raw": r.ticker_symbol_raw,
+                "type": r.tx_type,
+                "trade_date": r.trade_date.isoformat(),
+                "shares": r.shares,
+                "price": r.price,
+                "total": r.gross_amount,
+                "currency": r.currency,
+                "note": note,
+                "updated_at": r.updated_at.isoformat() + "Z" if r.updated_at else None,
+            }
+        )
+    return out
+
+
+def _available_shares_before_new_sell(
+    db: Session,
+    portfolio_id: str,
+    ticker_normalized: str,
+    trade_date: date,
+    *,
+    exclude_tx_id: str | None = None,
+) -> float:
+    rows = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+            PortfolioTransaction.ticker_symbol_normalized == ticker_normalized,
+            PortfolioTransaction.trade_date <= trade_date,
+        )
+        .order_by(PortfolioTransaction.trade_date.asc(), PortfolioTransaction.id.asc())
+        .all()
+    )
+    available = 0.0
+    for r in rows:
+        if exclude_tx_id and r.id == exclude_tx_id:
+            continue
+        if r.tx_type == "Buy":
+            available += float(r.shares)
+        elif r.tx_type == "Sell":
+            available -= float(r.shares)
+    return available
+
+
+def create_portfolio_transaction(
+    db: Session,
+    portfolio_id: str,
+    *,
+    ticker: str,
+    tx_type: str,
+    trade_date: str,
+    shares: float | None,
+    price: float,
+    currency: str = "USD",
+    note: str | None = None,
+    _exclude_transaction_id: str | None = None,
+    _commit: bool = True,
+) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    tx_type_clean = _validate_tx_type(tx_type)
+    d = _validate_trade_date(trade_date)
+    ticker_raw = (ticker or "").strip()
+    ticker_normalized = _normalize_ticker_input(ticker_raw)
+    if not ticker_normalized:
+        raise PortfolioEngineError("ticker is required.")
+    px = _validate_positive_number("price", price)
+
+    shares_value: float
+    if tx_type_clean in {"Buy", "Sell"}:
+        if shares is None:
+            raise PortfolioEngineError("shares is required for Buy/Sell.")
+        shares_value = _validate_positive_number("shares", shares)
+    else:
+        shares_value = float(shares or 0.0)
+        if shares_value < 0:
+            raise PortfolioEngineError("shares cannot be negative.")
+
+    if tx_type_clean == "Sell":
+        available = _available_shares_before_new_sell(
+            db,
+            portfolio_id,
+            ticker_normalized,
+            d,
+            exclude_tx_id=_exclude_transaction_id,
+        )
+        if shares_value > available + 1e-12:
+            raise PortfolioEngineError(
+                f"Sell cannot exceed available shares. ticker={ticker_normalized}, "
+                f"sell={shares_value}, available={available}."
+            )
+
+    sec_id = _ensure_security_mapping(db, ticker_normalized, ticker_raw)
+    now = datetime.utcnow()
+    if tx_type_clean == "Dividend":
+        gross = px if shares_value <= 0 else (shares_value * px)
+    else:
+        gross = shares_value * px
+
+    row = PortfolioTransaction(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        security_id=sec_id,
+        ticker_symbol_raw=ticker_raw or ticker_normalized,
+        ticker_symbol_normalized=ticker_normalized,
+        tx_type=tx_type_clean,
+        trade_date=d,
+        shares=shares_value,
+        price=px,
+        gross_amount=gross,
+        currency=(currency or "USD").strip().upper() or "USD",
+        metadata_json=json.dumps({"note": note} if note else {}, ensure_ascii=True),
+        source="manual",
+        created_at=now,
+        updated_at=now,
+        is_deleted=False,
+    )
+    db.add(row)
+    if _commit:
+        db.commit()
+        db.refresh(row)
+    else:
+        db.flush()
+    return {
+        "id": row.id,
+        "portfolio_id": row.portfolio_id,
+        "ticker": row.ticker_symbol_normalized,
+        "type": row.tx_type,
+        "trade_date": row.trade_date.isoformat(),
+        "shares": row.shares,
+        "price": row.price,
+        "total": row.gross_amount,
+        "currency": row.currency,
+        "note": note,
+    }
+
+
+def update_portfolio_transaction(
+    db: Session,
+    portfolio_id: str,
+    transaction_id: str,
+    *,
+    ticker: str,
+    tx_type: str,
+    trade_date: str,
+    shares: float | None,
+    price: float,
+    currency: str = "USD",
+    note: str | None = None,
+) -> dict[str, object]:
+    existing = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.id == transaction_id,
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+        )
+        .first()
+    )
+    if not existing:
+        raise PortfolioEngineError(f"Transaction '{transaction_id}' not found.")
+    try:
+        new_tx = create_portfolio_transaction(
+            db,
+            portfolio_id,
+            ticker=ticker,
+            tx_type=tx_type,
+            trade_date=trade_date,
+            shares=shares,
+            price=price,
+            currency=currency,
+            note=note,
+            _exclude_transaction_id=existing.id,
+            _commit=False,
+        )
+        existing.is_deleted = True
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        return new_tx
+    except Exception:
+        db.rollback()
+        raise
+
+
+def soft_delete_portfolio_transaction(db: Session, portfolio_id: str, transaction_id: str) -> None:
+    existing = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.id == transaction_id,
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+        )
+        .first()
+    )
+    if not existing:
+        raise PortfolioEngineError(f"Transaction '{transaction_id}' not found.")
+    existing.is_deleted = True
+    existing.updated_at = datetime.utcnow()
+    db.commit()
 
 
 def _write_transactions_csv(transactions: list[Transaction], output_path: Path) -> Path:
