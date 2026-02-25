@@ -45,6 +45,9 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
     create_portfolio,
+    get_portfolio_dashboard_summary,
+    get_portfolio_equity_history,
+    get_portfolio_holdings,
     get_latest_valuation_attribution,
     get_latest_valuation_diff,
     get_or_create_default_portfolio,
@@ -540,6 +543,49 @@ def get_portfolio_valuation_diff(portfolio_id: str, db: Session = Depends(get_db
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio valuation diff loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/dashboard-summary", response_model=PortfolioProcessResponse)
+def get_portfolio_dashboard_summary_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_portfolio_dashboard_summary(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio dashboard summary loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/holdings", response_model=PortfolioProcessResponse)
+def get_portfolio_holdings_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_portfolio_holdings(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio holdings loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/equity-history", response_model=PortfolioProcessResponse)
+def get_portfolio_equity_history_route(
+    portfolio_id: str,
+    range: str = Query(default="6M"),
+    db: Session = Depends(get_db),
+):
+    try:
+        data = get_portfolio_equity_history(db, portfolio_id, range_label=range)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio equity history loaded",
         data=data,
     )
 
