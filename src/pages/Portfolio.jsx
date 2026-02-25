@@ -8,6 +8,8 @@ import {
   createPortfolioTransaction,
   deletePortfolioTransaction,
   getLastPortfolioRun,
+  getValuationAttribution,
+  getValuationDiff,
   getLatestPortfolioRunMetadata,
   importPortfolioCsv,
   listPortfolioTransactions,
@@ -15,6 +17,7 @@ import {
   processPortfolio,
   updatePortfolioTransaction,
 } from "@/api/portfolio";
+import AttributionPanel from "@/components/portfolio/AttributionPanel";
 
 function statusColor(status) {
   switch (status) {
@@ -62,6 +65,8 @@ export default function Portfolio() {
   const [createName, setCreateName] = React.useState("");
   const [createCurrency, setCreateCurrency] = React.useState("USD");
   const [transactions, setTransactions] = React.useState([]);
+  const [valuationAttribution, setValuationAttribution] = React.useState(null);
+  const [valuationDiff, setValuationDiff] = React.useState(null);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
@@ -107,16 +112,22 @@ export default function Portfolio() {
         setResult(null);
         setMetadata(null);
         setTransactions([]);
+        setValuationAttribution(null);
+        setValuationDiff(null);
         return;
       }
-      const [last, latestMeta] = await Promise.all([
+      const [last, latestMeta, attribution, diff] = await Promise.all([
         getLastPortfolioRun(portfolioId),
         getLatestPortfolioRunMetadata(portfolioId),
+        getValuationAttribution(portfolioId),
+        getValuationDiff(portfolioId),
       ]);
       const lastData = last?.data || null;
       const metaData = latestMeta?.data || null;
       setResult(lastData);
       setMetadata(metaData);
+      setValuationAttribution(attribution?.data || null);
+      setValuationDiff(diff?.data || null);
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
     [loadTransactions]
@@ -144,11 +155,13 @@ export default function Portfolio() {
   }, [loadPortfolios]);
 
   React.useEffect(() => {
-    setResult(null);
-    setMetadata(null);
-    setTransactions([]);
-    setTxDirty(false);
-    setError("");
+      setResult(null);
+      setMetadata(null);
+      setTransactions([]);
+      setValuationAttribution(null);
+      setValuationDiff(null);
+      setTxDirty(false);
+      setError("");
     if (!selectedPortfolioId) return;
     (async () => {
       try {
@@ -365,7 +378,7 @@ export default function Portfolio() {
       {(result || metadata || transactions.length > 0) && (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 space-y-4">
           <div className="flex items-center gap-2">
-            {["summary", "coverage", "corrections", "transactions"].map((tab) => (
+            {["summary", "attribution", "coverage", "corrections", "transactions"].map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -411,6 +424,10 @@ export default function Portfolio() {
                 </div>
               </details>
             </div>
+          )}
+
+          {activeTab === "attribution" && (
+            <AttributionPanel attribution={valuationAttribution} diff={valuationDiff} />
           )}
 
           {activeTab === "coverage" && (
