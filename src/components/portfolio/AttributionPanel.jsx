@@ -13,6 +13,8 @@ function hasIntegrityFailure(unexplainedDelta) {
 
 export default function AttributionPanel({ attribution, diff }) {
   const data = attribution || {};
+  const breakdown = data?.breakdown_by_ticker || {};
+  const rows = Object.entries(breakdown);
   const integrityFailed = hasIntegrityFailure(data?.unexplained_delta);
 
   return (
@@ -83,6 +85,39 @@ export default function AttributionPanel({ attribution, diff }) {
           </div>
         </div>
       )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="border-b">
+              <th className="text-left py-2">Ticker</th>
+              <th className="text-left py-2">Price delta</th>
+              <th className="text-left py-2">FX delta</th>
+              <th className="text-left py-2">Transaction delta</th>
+              <th className="text-left py-2">Corporate action delta</th>
+              <th className="text-left py-2">Total delta</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="py-3 text-slate-500">No attribution breakdown available.</td>
+              </tr>
+            ) : (
+              rows.map(([ticker, row]) => (
+                <tr key={ticker} className="border-b">
+                  <td className="py-2 font-mono">{ticker}</td>
+                  <td className="py-2">{fmt(row?.price_delta)}</td>
+                  <td className="py-2">{fmt(row?.fx_delta)}</td>
+                  <td className="py-2">{fmt(row?.transaction_delta)}</td>
+                  <td className="py-2">{fmt(row?.corporate_action_delta)}</td>
+                  <td className="py-2">{fmt(row?.total_delta)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
