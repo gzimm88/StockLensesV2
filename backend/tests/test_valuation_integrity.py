@@ -116,21 +116,17 @@ def test_fx_mismatch_throws_error():
     db = _make_session()
     portfolio_id = _seed_portfolio(db, name="P4_FX")
 
-    create_transaction(
-        db,
-        portfolio_id=portfolio_id,
-        ticker="SAP",
-        tx_type="BUY",
-        quantity=2,
-        price=50,
-        trade_date=date.today(),
-        currency="EUR",
-    )
-    rebuild_position_ledger(db, portfolio_id)
-    _seed_price(db, "SAP", date.today(), 60.0)
-
-    with pytest.raises(PortfolioEngineError, match="Missing FX conversion from EUR to USD"):
-        rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    with pytest.raises(PortfolioEngineError, match="Missing execution FX conversion from EUR to USD"):
+        create_transaction(
+            db,
+            portfolio_id=portfolio_id,
+            ticker="SAP",
+            tx_type="BUY",
+            quantity=2,
+            price=50,
+            trade_date=date.today(),
+            currency="EUR",
+        )
 
 
 def test_nav_identical_across_two_rebuilds():
@@ -438,6 +434,7 @@ def test_fx_only_change_produces_only_fx_delta():
     db = _make_session()
     portfolio_id = _seed_portfolio(db, name="P6_FXOnly")
     today = date.today()
+    _seed_price(db, "EURUSD=X", today, 1.1)
     create_transaction(db, portfolio_id=portfolio_id, ticker="SAP", tx_type="BUY", quantity=10, price=10.0, trade_date=today, currency="EUR")
     _seed_price(db, "SAP", today, 20.0)
     _seed_price(db, "EURUSD=X", today, 1.10)

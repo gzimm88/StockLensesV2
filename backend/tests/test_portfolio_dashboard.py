@@ -13,6 +13,7 @@ from backend.main import app
 from backend.models import Portfolio, PricesHistory
 from backend.orchestrator.portfolio_orchestrator import (
     create_transaction,
+    rebuild_equity_history,
     rebuild_position_ledger,
     rebuild_valuation_snapshot,
 )
@@ -93,11 +94,13 @@ def test_dashboard_summary_holdings_and_history_deterministic():
         )
         rebuild_position_ledger(db, portfolio_id)
 
+        _seed_price(db, "AAPL", trade_date, 100.0)
         _seed_price(db, "AAPL", day1, 110.0)
         rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=30)
 
         _seed_price(db, "AAPL", day2, 120.0)
         rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=30)
+        rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
 
         summary_resp = client.get(f"/portfolios/{portfolio_id}/dashboard-summary")
         assert summary_resp.status_code == 200
@@ -130,11 +133,13 @@ def test_dashboard_summary_holdings_and_history_deterministic():
         history_resp = client.get(f"/portfolios/{portfolio_id}/equity-history?range=6M")
         assert history_resp.status_code == 200
         series = history_resp.json()["data"]["series"]
-        assert len(series) == 2
-        assert series[0]["date"] == day1.isoformat()
-        assert series[0]["total_equity"] == 100.0
-        assert series[1]["date"] == day2.isoformat()
-        assert series[1]["total_equity"] == 200.0
+        assert len(series) == 3
+        assert series[0]["date"] == trade_date.isoformat()
+        assert series[0]["total_equity"] == 0.0
+        assert series[1]["date"] == day1.isoformat()
+        assert series[1]["total_equity"] == 100.0
+        assert series[2]["date"] == day2.isoformat()
+        assert series[2]["total_equity"] == 200.0
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -157,8 +162,10 @@ def test_equity_history_invalid_range_returns_400():
             currency="USD",
         )
         rebuild_position_ledger(db, portfolio_id)
+        _seed_price(db, "MSFT", trade_date, 100.0)
         _seed_price(db, "MSFT", date.today(), 101.0)
         rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=30)
+        rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
         resp = client.get(f"/portfolios/{portfolio_id}/equity-history?range=BAD")
         assert resp.status_code == 400
         assert "Unsupported range" in resp.json()["detail"]

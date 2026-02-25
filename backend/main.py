@@ -58,6 +58,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     list_portfolios,
     load_last_portfolio_run,
     rebuild_position_ledger,
+    rebuild_equity_history,
     rebuild_valuation_snapshot,
     run_portfolio_creation_flow,
     soft_delete_corporate_action,
@@ -607,15 +608,45 @@ def get_portfolio_holdings_route(portfolio_id: str, db: Session = Depends(get_db
 def get_portfolio_equity_history_route(
     portfolio_id: str,
     range: str = Query(default="6M"),
+    build_version: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     try:
-        data = get_portfolio_equity_history(db, portfolio_id, range_label=range)
+        data = get_portfolio_equity_history(db, portfolio_id, range_label=range, build_version=build_version)
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio equity history loaded",
+        data=data,
+    )
+
+
+@app.post("/portfolios/{portfolio_id}/rebuild-equity-history", response_model=PortfolioProcessResponse)
+def post_rebuild_equity_history_for_portfolio(
+    portfolio_id: str,
+    mode: str = Query(default="incremental"),
+    force: bool = Query(default=False),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    strict: bool | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        data = rebuild_equity_history(
+            db,
+            portfolio_id,
+            mode=mode,
+            force=force,
+            from_date=from_date,
+            to_date=to_date,
+            strict=strict,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio equity history rebuilt",
         data=data,
     )
 
