@@ -380,7 +380,7 @@ async def process_portfolio_for_id(
     db: Session = Depends(get_db),
 ):
     try:
-        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id)
+        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id, strict=bool(strict))
         if isinstance(payload, dict):
             payload["strict_mode_requested"] = bool(strict)
         return PortfolioProcessResponse(
@@ -400,7 +400,7 @@ async def reprocess_portfolio_for_id(
     db: Session = Depends(get_db),
 ):
     try:
-        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id)
+        payload = await run_portfolio_creation_flow(db, portfolio_id=portfolio_id, strict=bool(strict))
         if isinstance(payload, dict):
             payload["strict_mode_requested"] = bool(strict)
         return PortfolioProcessResponse(

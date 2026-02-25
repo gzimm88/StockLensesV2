@@ -72,6 +72,7 @@ export default function Portfolio() {
   const [isImporting, setIsImporting] = React.useState(false);
   const [strictMode, setStrictMode] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [equityHistoryNotice, setEquityHistoryNotice] = React.useState("");
   const [result, setResult] = React.useState(null);
   const [metadata, setMetadata] = React.useState(null);
   const [activeTab, setActiveTab] = React.useState("summary");
@@ -135,9 +136,10 @@ export default function Portfolio() {
         setDashboardSummary(null);
         setHoldingsRows([]);
         setEquitySeries([]);
+        setEquityHistoryNotice("");
         return;
       }
-      const [last, latestMeta, attribution, diff, summary, holdings, history] = await Promise.all([
+      const settled = await Promise.allSettled([
         getLastPortfolioRun(portfolioId),
         getLatestPortfolioRunMetadata(portfolioId),
         getValuationAttribution(portfolioId),
@@ -146,15 +148,47 @@ export default function Portfolio() {
         getPortfolioHoldings(portfolioId),
         getPortfolioEquityHistory(portfolioId, equityRange),
       ]);
-      const lastData = last?.data || null;
-      const metaData = latestMeta?.data || null;
+
+      const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
+      const getSettledError = (idx) =>
+        settled[idx]?.status === "rejected" ? (settled[idx].reason?.message || "Request failed.") : "";
+      const isMissingHistoryErr = (msg) =>
+        typeof msg === "string" && msg.toLowerCase().includes("no equity history rows found");
+
+      const lastData = getSettledData(0);
+      const metaData = getSettledData(1);
+      const attributionData = getSettledData(2);
+      const diffData = getSettledData(3);
+      const summaryData = getSettledData(4);
+      const holdingsData = getSettledData(5);
+      const historyData = getSettledData(6);
+
+      const summaryErr = getSettledError(4);
+      const historyErr = getSettledError(6);
+      const missingHistory = isMissingHistoryErr(summaryErr) || isMissingHistoryErr(historyErr);
+
       setResult(lastData);
       setMetadata(metaData);
-      setValuationAttribution(attribution?.data || null);
-      setValuationDiff(diff?.data || null);
-      setDashboardSummary(summary?.data || null);
-      setHoldingsRows(holdings?.data?.holdings || []);
-      setEquitySeries(history?.data?.series || []);
+      setValuationAttribution(attributionData);
+      setValuationDiff(diffData);
+      setDashboardSummary(summaryData);
+      setHoldingsRows(holdingsData?.holdings || []);
+      setEquitySeries(historyData?.series || []);
+      setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
+
+      const nonHistoryErrors = [
+        getSettledError(0),
+        getSettledError(1),
+        getSettledError(2),
+        getSettledError(3),
+        getSettledError(5),
+      ].filter(Boolean);
+      const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
+      const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
+      if (combinedErrors.length > 0) {
+        setError(combinedErrors[0]);
+      }
+
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
     [loadTransactions, equityRange]
@@ -190,6 +224,7 @@ export default function Portfolio() {
       setDashboardSummary(null);
       setHoldingsRows([]);
       setEquitySeries([]);
+      setEquityHistoryNotice("");
       setTxDirty(false);
       setError("");
     if (!selectedPortfolioId) return;
@@ -406,10 +441,15 @@ export default function Portfolio() {
         )}
 
         {isLoading && <p className="text-xs text-slate-500 dark:text-slate-400">Loading portfolios...</p>}
+        {equityHistoryNotice && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+            {equityHistoryNotice}
+          </div>
+        )}
         {error && <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
       </div>
 
-      {!result && !metadata && selectedPortfolio && transactions.length === 0 && (
+      {!result && !metadata && selectedPortfolio && transactions.length === 0 && !equityHistoryNotice && (
         <div className="rounded-xl border border-slate-200 bg-white p-6">
           <h2 className="text-lg font-semibold">No transactions yet</h2>
           <p className="text-sm text-slate-600 mt-1">Import CSV or add manually.</p>

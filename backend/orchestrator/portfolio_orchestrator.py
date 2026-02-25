@@ -3027,7 +3027,7 @@ def _write_transactions_csv(transactions: list[Transaction], output_path: Path) 
     return output_path
 
 
-async def run_portfolio_creation_flow(db: Session, portfolio_id: str) -> dict[str, object]:
+async def run_portfolio_creation_flow(db: Session, portfolio_id: str, strict: bool = False) -> dict[str, object]:
     """
     Backend-only flow:
       upload portfolio (already saved to hardcoded CSV)
@@ -3200,6 +3200,21 @@ async def run_portfolio_creation_flow(db: Session, portfolio_id: str) -> dict[st
             "irr": portfolio_irr,
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
+
+        # Phase 9.1 stabilization: keep legacy processing flow and ensure
+        # deterministic equity history exists for dashboard endpoints.
+        latest_eq_build = _latest_completed_equity_build(db, portfolio_id)
+        eq_mode = "incremental" if latest_eq_build else "full"
+        eq_force = False if latest_eq_build else True
+        eq_build = rebuild_equity_history(
+            db,
+            portfolio_id,
+            mode=eq_mode,
+            force=eq_force,
+            strict=bool(strict),
+        )
+        payload["equity_history_build"] = eq_build
+
         cache_path = _run_cache_path(portfolio_id)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
