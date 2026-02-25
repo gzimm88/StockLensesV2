@@ -11,7 +11,9 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base
 from backend.models import Portfolio, PricesHistory, ValuationSnapshot
 from backend.orchestrator.portfolio_orchestrator import (
+    create_corporate_action,
     create_transaction,
+    get_latest_valuation_attribution,
     get_latest_valuation_diff,
     rebuild_position_ledger,
     rebuild_valuation_snapshot,
@@ -358,3 +360,148 @@ def test_hash_mismatch_guard_enforced():
 
     with pytest.raises(PortfolioEngineError, match="Hash mismatch guard failed"):
         rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+
+def test_attribution_sums_exactly():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_Exact")
+    today = date.today()
+    create_transaction(
+        db,
+        portfolio_id=portfolio_id,
+        ticker="AAPL",
+        tx_type="BUY",
+        quantity=10,
+        price=90.0,
+        trade_date=today,
+        currency="USD",
+    )
+    _seed_price(db, "AAPL", today, 100.0)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    row = db.query(PricesHistory).filter(PricesHistory.ticker == "AAPL").first()
+    assert row is not None
+    row.close = 110.0
+    row.close_adj = 110.0
+    db.commit()
+    latest = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    attr = get_latest_valuation_attribution(db, portfolio_id)
+
+    assert latest["unexplained_delta"] == 0.0
+    assert attr["unexplained_delta"] == 0.0
+    assert attr["previous_nav"] + attr["transaction_delta"] + attr["price_delta"] + attr["fx_delta"] + attr["corporate_action_delta"] == attr["current_nav"]
+
+
+def test_price_only_change_produces_only_price_delta():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_PriceOnly")
+    today = date.today()
+    create_transaction(db, portfolio_id=portfolio_id, ticker="AAPL", tx_type="BUY", quantity=2, price=50.0, trade_date=today, currency="USD")
+    _seed_price(db, "AAPL", today, 100.0)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    row = db.query(PricesHistory).filter(PricesHistory.ticker == "AAPL").first()
+    assert row is not None
+    row.close = 105.0
+    row.close_adj = 105.0
+    db.commit()
+
+    out = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    assert out["price_change_component"] == 10.0
+    assert out["transaction_change_component"] == 0.0
+    assert out["fx_change_component"] == 0.0
+    assert out["corporate_action_change_component"] == 0.0
+
+
+def test_transaction_only_change_produces_only_transaction_delta():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_TxOnly")
+    today = date.today()
+    create_transaction(db, portfolio_id=portfolio_id, ticker="AAPL", tx_type="BUY", quantity=1, price=50.0, trade_date=today, currency="USD")
+    _seed_price(db, "AAPL", today, 100.0)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    create_transaction(db, portfolio_id=portfolio_id, ticker="AAPL", tx_type="BUY", quantity=3, price=55.0, trade_date=today, currency="USD")
+    rebuild_position_ledger(db, portfolio_id)
+    out = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    assert out["transaction_change_component"] == 300.0
+    assert out["price_change_component"] == 0.0
+    assert out["fx_change_component"] == 0.0
+    assert out["corporate_action_change_component"] == 0.0
+
+
+def test_fx_only_change_produces_only_fx_delta():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_FXOnly")
+    today = date.today()
+    create_transaction(db, portfolio_id=portfolio_id, ticker="SAP", tx_type="BUY", quantity=10, price=10.0, trade_date=today, currency="EUR")
+    _seed_price(db, "SAP", today, 20.0)
+    _seed_price(db, "EURUSD=X", today, 1.10)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    row = db.query(PricesHistory).filter(PricesHistory.ticker == "EURUSD=X").first()
+    assert row is not None
+    row.close = 1.20
+    row.close_adj = 1.20
+    db.commit()
+
+    out = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    assert out["fx_change_component"] == 20.0
+    assert out["price_change_component"] == 0.0
+    assert out["transaction_change_component"] == 0.0
+    assert out["corporate_action_change_component"] == 0.0
+
+
+def test_corporate_action_attribution_correctness():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_Corp")
+    today = date.today()
+    create_transaction(db, portfolio_id=portfolio_id, ticker="NVDA", tx_type="BUY", quantity=1, price=80.0, trade_date=today, currency="USD")
+    _seed_price(db, "NVDA", today, 100.0)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    create_corporate_action(
+        db,
+        portfolio_id=portfolio_id,
+        ticker="NVDA",
+        action_type="SPLIT",
+        effective_date=today,
+        factor=2.0,
+        cash_amount=None,
+        metadata=None,
+    )
+    rebuild_position_ledger(db, portfolio_id)
+    out = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+
+    assert out["corporate_action_change_component"] == 100.0
+    assert out["transaction_change_component"] == 0.0
+    assert out["price_change_component"] == 0.0
+    assert out["fx_change_component"] == 0.0
+
+
+def test_deterministic_repeat_attribution_identical_across_runs():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="P6_Repeat")
+    today = date.today()
+    create_transaction(db, portfolio_id=portfolio_id, ticker="AAPL", tx_type="BUY", quantity=2, price=40.0, trade_date=today, currency="USD")
+    _seed_price(db, "AAPL", today, 100.0)
+    rebuild_position_ledger(db, portfolio_id)
+    rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    second = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    third = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    attr_second = get_latest_valuation_attribution(db, portfolio_id)
+    # latest now is third; rebuild once more to compare no-change attribution
+    fourth = rebuild_valuation_snapshot(db, portfolio_id, strict=False, stale_trading_days=3)
+    attr_fourth = get_latest_valuation_attribution(db, portfolio_id)
+
+    assert second["input_hash"] == third["input_hash"] == fourth["input_hash"]
+    assert attr_second["transaction_delta"] == attr_fourth["transaction_delta"] == 0.0
+    assert attr_second["price_delta"] == attr_fourth["price_delta"] == 0.0
+    assert attr_second["fx_delta"] == attr_fourth["fx_delta"] == 0.0
+    assert attr_second["corporate_action_delta"] == attr_fourth["corporate_action_delta"] == 0.0

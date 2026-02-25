@@ -1481,6 +1481,12 @@ def _latest_ledger_snapshot_or_error(db: Session, portfolio_id: str) -> LedgerSn
     return row
 
 
+def _ledger_snapshot_by_id(db: Session, ledger_snapshot_id: str | None) -> LedgerSnapshot | None:
+    if not ledger_snapshot_id:
+        return None
+    return db.query(LedgerSnapshot).filter(LedgerSnapshot.id == ledger_snapshot_id).first()
+
+
 def _ticker_currency_map_or_error(db: Session, portfolio_id: str) -> dict[str, str]:
     rows = _sorted_active_transactions(db, portfolio_id)
     currencies: dict[str, set[str]] = defaultdict(set)
@@ -1493,6 +1499,37 @@ def _ticker_currency_map_or_error(db: Session, portfolio_id: str) -> dict[str, s
                 f"Ticker {ticker} has mixed transaction currencies {sorted(values)}. Explicit currency normalization is required."
             )
         out[ticker] = next(iter(values))
+    return out
+
+
+def _tx_share_deltas_in_window(
+    db: Session,
+    portfolio_id: str,
+    *,
+    start_exclusive: datetime,
+    end_inclusive: datetime,
+) -> dict[str, Decimal]:
+    rows = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+            PortfolioTransaction.deleted_at.is_(None),
+            PortfolioTransaction.created_at.is_not(None),
+            PortfolioTransaction.created_at > start_exclusive,
+            PortfolioTransaction.created_at <= end_inclusive,
+        )
+        .order_by(PortfolioTransaction.trade_date.asc(), PortfolioTransaction.created_at.asc(), PortfolioTransaction.id.asc())
+        .all()
+    )
+    out: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for r in rows:
+        ticker = r.ticker_symbol_normalized
+        shares = Decimal(str(float(r.shares or 0.0)))
+        if r.tx_type == "Buy":
+            out[ticker] += shares
+        elif r.tx_type == "Sell":
+            out[ticker] -= shares
     return out
 
 
@@ -1778,6 +1815,12 @@ def rebuild_valuation_snapshot(
     )
     next_version = int(previous.valuation_version if previous else 0) + 1
 
+    # Hash validation guard: identical inputs must produce identical NAV.
+    if previous and previous.input_hash == valuation_input_hash and abs(float(previous.nav) - nav_float) > 1e-12:
+        raise PortfolioEngineError(
+            "Hash mismatch guard failed: identical valuation input_hash produced different NAV."
+        )
+
     prev_components = json.loads(previous.components_json) if previous and previous.components_json else []
     prev_map: dict[str, dict[str, object]] = {
         str(c.get("ticker")): c for c in (prev_components if isinstance(prev_components, list) else [])
@@ -1791,36 +1834,82 @@ def rebuild_valuation_snapshot(
         if abs(delta_q) > 1e-12:
             holdings_delta[ticker] = delta_q
 
-    # Decompose NAV change into transaction and price components.
-    tx_component = Decimal("0")
-    price_component = Decimal("0")
+    prev_nav_dec = Decimal("0") if previous is None else Decimal(str(float(previous.nav)))
+    nav_delta_dec = (Decimal(str(nav_float)) - prev_nav_dec).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    previous_ledger = _ledger_snapshot_by_id(db, previous.ledger_snapshot_id) if previous else None
+    if previous_ledger and ledger.as_of < previous_ledger.as_of:
+        raise PortfolioEngineError("Snapshot ordering mismatch: current ledger is older than previous valuation ledger.")
+
+    tx_qty_delta_by_ticker: dict[str, Decimal] = {}
+    if previous_ledger:
+        tx_qty_delta_by_ticker = _tx_share_deltas_in_window(
+            db,
+            portfolio_id,
+            start_exclusive=previous_ledger.as_of,
+            end_inclusive=ledger.as_of,
+        )
+
+    transaction_attr: dict[str, Decimal] = {}
+    price_attr: dict[str, Decimal] = {}
+    fx_attr: dict[str, Decimal] = {}
+    corporate_attr: dict[str, Decimal] = {}
+
     for ticker in sorted(set(prev_map.keys()) | set(curr_map.keys())):
         prev = prev_map.get(ticker, {})
         curr = curr_map.get(ticker, {})
-        if not bool(curr.get("included", False)) and not bool(prev.get("included", False)):
-            continue
-        q_prev = Decimal(str(float(prev.get("quantity") or 0.0)))
-        q_curr = Decimal(str(float(curr.get("quantity") or 0.0)))
+
+        q_prev = Decimal(str(float(prev.get("quantity") or 0.0))) if bool(prev.get("included", False)) else Decimal("0")
+        q_curr = Decimal(str(float(curr.get("quantity") or 0.0))) if bool(curr.get("included", False)) else Decimal("0")
         p_prev = Decimal(str(float(prev.get("price") or 0.0)))
         p_curr = Decimal(str(float(curr.get("price") or 0.0)))
         fx_prev = Decimal(str(float(prev.get("fx_rate") or 1.0)))
         fx_curr = Decimal(str(float(curr.get("fx_rate") or 1.0)))
-        tx_component += ((q_curr - q_prev) * p_prev * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
-        price_component += (q_curr * ((p_curr * fx_curr) - (p_prev * fx_prev))).quantize(
-            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
-        )
 
-    nav_delta = 0.0 if previous is None else float(
-        (Decimal(str(nav_float)) - Decimal(str(previous.nav))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        tx_qty = tx_qty_delta_by_ticker.get(ticker, Decimal("0"))
+        total_qty_delta = (q_curr - q_prev)
+        corp_qty = total_qty_delta - tx_qty
+
+        tx_delta = (tx_qty * p_prev * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        corp_delta = (corp_qty * p_prev * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        price_delta = (q_curr * (p_curr - p_prev) * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        fx_delta = (q_curr * p_curr * (fx_curr - fx_prev)).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+        if tx_delta != Decimal("0"):
+            transaction_attr[ticker] = tx_delta
+        if corp_delta != Decimal("0"):
+            corporate_attr[ticker] = corp_delta
+        if price_delta != Decimal("0"):
+            price_attr[ticker] = price_delta
+        if fx_delta != Decimal("0"):
+            fx_attr[ticker] = fx_delta
+
+    tx_component = sum(transaction_attr.values(), Decimal("0")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    price_component = sum(price_attr.values(), Decimal("0")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    fx_component = sum(fx_attr.values(), Decimal("0")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    corp_component = sum(corporate_attr.values(), Decimal("0")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    total_explained_dec = (tx_component + price_component + fx_component + corp_component).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
     )
-    tx_component_float = float(tx_component.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP))
-    price_component_float = float(price_component.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP))
+    unexplained_dec = (nav_delta_dec - total_explained_dec).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
 
-    # Hash validation guard: identical inputs must produce identical NAV.
-    if previous and previous.input_hash == valuation_input_hash and abs(float(previous.nav) - nav_float) > 1e-12:
+    if unexplained_dec != Decimal("0"):
         raise PortfolioEngineError(
-            "Hash mismatch guard failed: identical valuation input_hash produced different NAV."
+            f"Attribution unexplained delta detected: {float(unexplained_dec)} (deterministic mode requires 0)."
         )
+    if (prev_nav_dec + total_explained_dec).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP) != Decimal(
+        str(nav_float)
+    ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP):
+        raise PortfolioEngineError("Attribution sum mismatch: previous_nav + explained_delta != current_nav.")
+
+    nav_delta = float(nav_delta_dec)
+    tx_component_float = float(tx_component)
+    price_component_float = float(price_component)
+    fx_component_float = float(fx_component)
+    corp_component_float = float(corp_component)
+    total_explained_float = float(total_explained_dec)
+    unexplained_float = float(unexplained_dec)
 
     elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
     logger.info(
@@ -1841,8 +1930,34 @@ def rebuild_valuation_snapshot(
         nav=nav_float,
         nav_delta=nav_delta if previous else 0.0,
         holdings_delta_json=json.dumps(holdings_delta, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        price_attribution_json=json.dumps(
+            {k: float(v) for k, v in sorted(price_attr.items())},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        fx_attribution_json=json.dumps(
+            {k: float(v) for k, v in sorted(fx_attr.items())},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        transaction_attribution_json=json.dumps(
+            {k: float(v) for k, v in sorted(transaction_attr.items())},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        corporate_action_attribution_json=json.dumps(
+            {k: float(v) for k, v in sorted(corporate_attr.items())},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         price_change_component=price_component_float if previous else 0.0,
         transaction_change_component=tx_component_float if previous else 0.0,
+        total_explained_delta=total_explained_float if previous else 0.0,
+        unexplained_delta=unexplained_float if previous else 0.0,
         currency=base_currency,
         as_of=as_of,
         created_at=now,
@@ -1864,6 +1979,10 @@ def rebuild_valuation_snapshot(
         "holdings_delta": holdings_delta,
         "price_change_component": snapshot.price_change_component,
         "transaction_change_component": snapshot.transaction_change_component,
+        "fx_change_component": fx_component_float if previous else 0.0,
+        "corporate_action_change_component": corp_component_float if previous else 0.0,
+        "total_explained_delta": snapshot.total_explained_delta,
+        "unexplained_delta": snapshot.unexplained_delta,
         "currency": snapshot.currency,
         "as_of": snapshot.as_of.isoformat() + "Z",
         "input_hash": snapshot.input_hash,
@@ -1875,6 +1994,10 @@ def rebuild_valuation_snapshot(
         "price_snapshot_count": len(price_snaps),
         "fx_snapshot_count": len(fx_snaps),
         "rebuild_duration_ms": elapsed_ms,
+        "price_attribution": {k: float(v) for k, v in sorted(price_attr.items())},
+        "fx_attribution": {k: float(v) for k, v in sorted(fx_attr.items())},
+        "transaction_attribution": {k: float(v) for k, v in sorted(transaction_attr.items())},
+        "corporate_action_attribution": {k: float(v) for k, v in sorted(corporate_attr.items())},
         "components": components,
     }
 
@@ -1913,6 +2036,73 @@ def get_latest_valuation_diff(db: Session, portfolio_id: str) -> dict[str, objec
         "holdings_delta": holdings_delta if isinstance(holdings_delta, dict) else {},
         "price_change_component": float(latest.price_change_component or 0.0),
         "transaction_change_component": float(latest.transaction_change_component or 0.0),
+        "as_of": latest.as_of.isoformat() + "Z" if latest.as_of else None,
+    }
+
+
+def get_latest_valuation_attribution(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    latest = (
+        db.query(ValuationSnapshot)
+        .filter(ValuationSnapshot.portfolio_id == portfolio_id)
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+    if not latest:
+        raise PortfolioEngineError(f"No valuation snapshot found for portfolio '{portfolio_id}'.")
+    previous = (
+        db.query(ValuationSnapshot)
+        .filter(
+            ValuationSnapshot.portfolio_id == portfolio_id,
+            ValuationSnapshot.valuation_version < latest.valuation_version,
+        )
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+
+    transaction = json.loads(latest.transaction_attribution_json or "{}")
+    price = json.loads(latest.price_attribution_json or "{}")
+    fx = json.loads(latest.fx_attribution_json or "{}")
+    corporate = json.loads(latest.corporate_action_attribution_json or "{}")
+
+    all_tickers = sorted(set(transaction.keys()) | set(price.keys()) | set(fx.keys()) | set(corporate.keys()))
+    breakdown = {
+        t: {
+            "transaction_delta": float(transaction.get(t, 0.0)),
+            "price_delta": float(price.get(t, 0.0)),
+            "fx_delta": float(fx.get(t, 0.0)),
+            "corporate_action_delta": float(corporate.get(t, 0.0)),
+        }
+        for t in all_tickers
+    }
+    prev_nav = Decimal(str(float(previous.nav))) if previous else Decimal("0")
+    curr_nav = Decimal(str(float(latest.nav)))
+    tx_delta = Decimal(str(float(latest.transaction_change_component or 0.0)))
+    price_delta = Decimal(str(float(latest.price_change_component or 0.0)))
+    fx_delta = Decimal(str(sum(float(v) for v in fx.values())))
+    corp_delta = Decimal(str(sum(float(v) for v in corporate.values())))
+    unexplained = Decimal(str(float(latest.unexplained_delta or 0.0)))
+    explained = (tx_delta + price_delta + fx_delta + corp_delta).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    if unexplained != Decimal("0").quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP):
+        raise PortfolioEngineError("Attribution guard failed: unexplained_delta must be 0.")
+    if (prev_nav + explained).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP) != curr_nav.quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    ):
+        raise PortfolioEngineError("Attribution guard failed: component sum does not match current NAV.")
+
+    return {
+        "portfolio_id": portfolio_id,
+        "previous_nav": float(prev_nav),
+        "current_nav": float(curr_nav),
+        "transaction_delta": float(tx_delta),
+        "price_delta": float(price_delta),
+        "fx_delta": float(fx_delta),
+        "corporate_action_delta": float(corp_delta),
+        "unexplained_delta": float(unexplained),
+        "total_explained_delta": float(explained),
+        "breakdown_by_ticker": breakdown,
+        "valuation_snapshot_id": latest.id,
+        "valuation_version": int(latest.valuation_version or 0),
         "as_of": latest.as_of.isoformat() + "Z" if latest.as_of else None,
     }
 
