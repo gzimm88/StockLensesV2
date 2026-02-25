@@ -64,6 +64,24 @@ export async function getLatestPortfolioRunMetadata(portfolioId) {
   }
 }
 
+export async function getValuationAttribution(portfolioId) {
+  try {
+    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/valuation-attribution`, { method: "GET" });
+  } catch (err) {
+    if (String(err?.message || "").includes("404")) return null;
+    throw err;
+  }
+}
+
+export async function getValuationDiff(portfolioId) {
+  try {
+    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/valuation-diff`, { method: "GET" });
+  } catch (err) {
+    if (String(err?.message || "").includes("404")) return null;
+    throw err;
+  }
+}
+
 export function listPortfolioTransactions(portfolioId) {
   const normalize = (res) => {
     const raw = res?.data?.transactions || [];
