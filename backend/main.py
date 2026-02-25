@@ -26,6 +26,7 @@ from backend.models import (
     PortfolioCorrectionEvent,
     PortfolioCoverageEvent,
     PortfolioProcessingRun,
+    PortfolioSettings,
     PortfolioTransaction,
     PricesHistory,
     ScoreSnapshot,
@@ -167,6 +168,35 @@ def _ensure_phase6_schema() -> None:
 
 
 _ensure_phase6_schema()
+
+
+def _ensure_phase9_schema() -> None:
+    with engine.begin() as conn:
+        tx_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_transactions)"))}
+        if tx_cols and "fx_at_execution" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN fx_at_execution FLOAT NOT NULL DEFAULT 1.0"))
+        if tx_cols and "gross_amount_base" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN gross_amount_base FLOAT NOT NULL DEFAULT 0.0"))
+        # Backfill immutable booking facts for existing rows where possible.
+        conn.execute(
+            text(
+                """
+                UPDATE portfolio_transactions
+                SET
+                    fx_at_execution = CASE
+                        WHEN fx_at_execution IS NULL OR fx_at_execution = 0 THEN 1.0
+                        ELSE fx_at_execution
+                    END,
+                    gross_amount_base = CASE
+                        WHEN gross_amount_base IS NULL OR gross_amount_base = 0 THEN gross_amount
+                        ELSE gross_amount_base
+                    END
+                """
+            )
+        )
+
+
+_ensure_phase9_schema()
 
 
 def _bootstrap_default_portfolio() -> None:
