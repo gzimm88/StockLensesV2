@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -265,6 +265,22 @@ class Portfolio(Base):
     updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
 
 
+class PortfolioSettings(Base):
+    __tablename__ = "portfolio_settings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    strict_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale_trading_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calendar_policy: Mapped[str] = mapped_column(String, nullable=False, default="union_required_all_inputs")
+    default_history_range: Mapped[str | None] = mapped_column(String, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 class PortfolioTransaction(Base):
     __tablename__ = "portfolio_transactions"
 
@@ -278,6 +294,8 @@ class PortfolioTransaction(Base):
     shares: Mapped[float] = mapped_column(Float, nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     gross_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    fx_at_execution: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    gross_amount_base: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     currency: Mapped[str] = mapped_column(String, nullable=False, default="USD")
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -448,3 +466,42 @@ class ValuationSnapshot(Base):
     rebuild_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
     components_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PortfolioEquityHistoryBuild(Base):
+    __tablename__ = "portfolio_equity_history_builds"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    build_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    from_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    to_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    strict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    engine_version: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    rows_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    forced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class PortfolioEquityHistoryRow(Base):
+    __tablename__ = "portfolio_equity_history_rows"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), index=True)
+    build_version: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    total_equity: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    cash_balance: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    market_value_total: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    cost_basis_total: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    unrealized_gain_value: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    realized_gain_value: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    dividend_cash_value: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    day_change_value: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    day_change_percent: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)

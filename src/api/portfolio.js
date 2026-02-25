@@ -82,6 +82,37 @@ export async function getValuationDiff(portfolioId) {
   }
 }
 
+export async function getPortfolioDashboardSummary(portfolioId) {
+  try {
+    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/dashboard-summary`, { method: "GET" });
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.includes("404") || msg.includes("No valuation snapshot found")) return null;
+    throw err;
+  }
+}
+
+export async function getPortfolioHoldings(portfolioId) {
+  try {
+    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/holdings`, { method: "GET" });
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.includes("404") || msg.includes("No valuation snapshot found")) return null;
+    throw err;
+  }
+}
+
+export async function getPortfolioEquityHistory(portfolioId, range = "6M") {
+  const q = encodeURIComponent(range || "6M");
+  try {
+    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/equity-history?range=${q}`, { method: "GET" });
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (msg.includes("404") || msg.includes("No valuation snapshot found")) return null;
+    throw err;
+  }
+}
+
 export function listPortfolioTransactions(portfolioId) {
   const normalize = (res) => {
     const raw = res?.data?.transactions || [];

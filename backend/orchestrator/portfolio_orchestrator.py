@@ -2107,6 +2107,301 @@ def get_latest_valuation_attribution(db: Session, portfolio_id: str) -> dict[str
     }
 
 
+def _latest_valuation_snapshot_or_error(db: Session, portfolio_id: str) -> ValuationSnapshot:
+    row = (
+        db.query(ValuationSnapshot)
+        .filter(ValuationSnapshot.portfolio_id == portfolio_id)
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+    if not row:
+        raise PortfolioEngineError(f"No valuation snapshot found for portfolio '{portfolio_id}'.")
+    return row
+
+
+def _previous_valuation_snapshot(db: Session, portfolio_id: str, latest_version: int) -> ValuationSnapshot | None:
+    return (
+        db.query(ValuationSnapshot)
+        .filter(
+            ValuationSnapshot.portfolio_id == portfolio_id,
+            ValuationSnapshot.valuation_version < latest_version,
+        )
+        .order_by(ValuationSnapshot.valuation_version.desc(), ValuationSnapshot.created_at.desc())
+        .first()
+    )
+
+
+def _components_map(snapshot: ValuationSnapshot | None) -> dict[str, dict[str, object]]:
+    if snapshot is None or not snapshot.components_json:
+        return {}
+    parsed = json.loads(snapshot.components_json)
+    if not isinstance(parsed, list):
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for row in parsed:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker:
+            out[ticker] = row
+    return out
+
+
+def _net_cashflow_by_ticker(db: Session, portfolio_id: str) -> dict[str, Decimal]:
+    rows = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+            PortfolioTransaction.deleted_at.is_(None),
+        )
+        .order_by(PortfolioTransaction.trade_date.asc(), PortfolioTransaction.created_at.asc(), PortfolioTransaction.id.asc())
+        .all()
+    )
+    out: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for r in rows:
+        ticker = (r.ticker_symbol_normalized or r.ticker_raw or "").strip().upper()
+        if not ticker:
+            continue
+        gross = Decimal(str(float(r.gross_amount or 0.0)))
+        if r.tx_type == "Buy":
+            out[ticker] -= gross
+        elif r.tx_type in {"Sell", "Dividend"}:
+            out[ticker] += gross
+
+    actions = (
+        db.query(CorporateAction)
+        .filter(
+            CorporateAction.portfolio_id == portfolio_id,
+            CorporateAction.is_deleted == False,
+            CorporateAction.deleted_at.is_(None),
+            CorporateAction.action_type == "DIVIDEND",
+        )
+        .order_by(CorporateAction.effective_date.asc(), CorporateAction.created_at.asc(), CorporateAction.id.asc())
+        .all()
+    )
+    for a in actions:
+        ticker = (a.ticker or "").strip().upper()
+        if not ticker:
+            continue
+        out[ticker] += Decimal(str(float(a.cash_amount or 0.0)))
+    return out
+
+
+def _range_start_from_label(end_date: date, range_label: str) -> date | None:
+    label = (range_label or "6M").strip().upper()
+    if label == "MAX":
+        return None
+    if label.endswith("M") and label[:-1].isdigit():
+        months = int(label[:-1])
+        return end_date - timedelta(days=30 * months)
+    if label.endswith("Y") and label[:-1].isdigit():
+        years = int(label[:-1])
+        return end_date - timedelta(days=365 * years)
+    raise PortfolioEngineError(f"Unsupported range '{range_label}'. Use 1M, 3M, 6M, 1Y, 5Y, or MAX.")
+
+
+def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    latest = _latest_valuation_snapshot_or_error(db, portfolio_id)
+    previous = _previous_valuation_snapshot(db, portfolio_id, int(latest.valuation_version or 0))
+    latest_ledger = _ledger_snapshot_by_id(db, latest.ledger_snapshot_id)
+    if latest_ledger is None:
+        raise PortfolioEngineError("Latest valuation snapshot is missing its linked ledger snapshot.")
+
+    holdings = json.loads(latest_ledger.holdings_json or "{}")
+    basis = json.loads(latest_ledger.basis_json or "{}")
+    if not isinstance(holdings, dict) or not isinstance(basis, dict):
+        raise PortfolioEngineError("Invalid ledger snapshot payload.")
+
+    cost_basis_total = Decimal("0")
+    for ticker, qty_value in holdings.items():
+        qty = Decimal(str(float(qty_value or 0.0)))
+        if qty <= Decimal("0"):
+            continue
+        avg_cost = Decimal(str(float(basis.get(ticker) or 0.0)))
+        cost_basis_total += (qty * avg_cost)
+    cost_basis_total = cost_basis_total.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    market_value_total = Decimal(str(float(latest.nav or 0.0))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    cash_balance = Decimal(str(float(latest_ledger.cash or 0.0))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    total_equity = (market_value_total + cash_balance).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    unrealized = (market_value_total - cost_basis_total).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    realized = (total_equity - unrealized).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    prev_total_equity = None
+    day_change = Decimal("0").quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    if previous:
+        prev_ledger = _ledger_snapshot_by_id(db, previous.ledger_snapshot_id)
+        if prev_ledger is None:
+            raise PortfolioEngineError("Previous valuation snapshot is missing its linked ledger snapshot.")
+        prev_market = Decimal(str(float(previous.nav or 0.0))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        prev_cash = Decimal(str(float(prev_ledger.cash or 0.0))).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        prev_total_equity = (prev_market + prev_cash).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        day_change = (total_equity - prev_total_equity).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    day_change_pct = Decimal("0")
+    if prev_total_equity and prev_total_equity != Decimal("0"):
+        day_change_pct = ((day_change / prev_total_equity) * Decimal("100")).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+
+    unrealized_pct = Decimal("0")
+    if cost_basis_total != Decimal("0"):
+        unrealized_pct = ((unrealized / cost_basis_total) * Decimal("100")).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+
+    return {
+        "portfolio_id": portfolio_id,
+        "as_of": latest.as_of.date().isoformat(),
+        "total_equity": float(total_equity),
+        "cash_balance": float(cash_balance),
+        "cost_basis_total": float(cost_basis_total),
+        "market_value_total": float(market_value_total),
+        "day_change_value": float(day_change),
+        "day_change_percent": float(day_change_pct),
+        "unrealized_gain_value": float(unrealized),
+        "unrealized_gain_percent": float(unrealized_pct),
+        "realized_gain_value": float(realized),
+    }
+
+
+def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    latest = _latest_valuation_snapshot_or_error(db, portfolio_id)
+    previous = _previous_valuation_snapshot(db, portfolio_id, int(latest.valuation_version or 0))
+    latest_ledger = _ledger_snapshot_by_id(db, latest.ledger_snapshot_id)
+    if latest_ledger is None:
+        raise PortfolioEngineError("Latest valuation snapshot is missing its linked ledger snapshot.")
+
+    holdings = json.loads(latest_ledger.holdings_json or "{}")
+    basis = json.loads(latest_ledger.basis_json or "{}")
+    if not isinstance(holdings, dict) or not isinstance(basis, dict):
+        raise PortfolioEngineError("Invalid ledger snapshot payload.")
+
+    current_components = _components_map(latest)
+    previous_components = _components_map(previous)
+    latest_price_attr = json.loads(latest.price_attribution_json or "{}")
+    latest_fx_attr = json.loads(latest.fx_attribution_json or "{}")
+    if not isinstance(latest_price_attr, dict):
+        latest_price_attr = {}
+    if not isinstance(latest_fx_attr, dict):
+        latest_fx_attr = {}
+
+    net_cashflows = _net_cashflow_by_ticker(db, portfolio_id)
+
+    rows: list[dict[str, object]] = []
+    for ticker in sorted(holdings.keys()):
+        qty = Decimal(str(float(holdings.get(ticker) or 0.0)))
+        if qty <= Decimal("0"):
+            continue
+        avg_cost = Decimal(str(float(basis.get(ticker) or 0.0)))
+        total_cost = (qty * avg_cost).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+        curr = current_components.get(ticker, {})
+        prev = previous_components.get(ticker, {})
+        market_price = curr.get("price")
+        market_value = None
+        if curr.get("included", False):
+            market_value = Decimal(str(float(curr.get("value_base") or 0.0))).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+
+        day_change = (
+            Decimal(str(float(latest_price_attr.get(ticker) or 0.0))) +
+            Decimal(str(float(latest_fx_attr.get(ticker) or 0.0)))
+        ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+        prev_market_value = None
+        if prev.get("included", False):
+            prev_market_value = Decimal(str(float(prev.get("value_base") or 0.0))).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+
+        day_change_pct = Decimal("0")
+        if prev_market_value and prev_market_value != Decimal("0"):
+            day_change_pct = ((day_change / prev_market_value) * Decimal("100")).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+
+        if market_value is None:
+            unrealized = None
+            unrealized_pct = None
+        else:
+            unrealized = (market_value - total_cost).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            unrealized_pct = Decimal("0")
+            if total_cost != Decimal("0"):
+                unrealized_pct = ((unrealized / total_cost) * Decimal("100")).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+
+        realized = (net_cashflows.get(ticker, Decimal("0")) + total_cost).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+
+        rows.append(
+            {
+                "ticker": ticker,
+                "quantity": float(qty),
+                "avg_cost_basis": float(avg_cost),
+                "total_cost_basis": float(total_cost),
+                "market_price": float(market_price) if market_price is not None else None,
+                "market_value": float(market_value) if market_value is not None else None,
+                "day_change_value": float(day_change),
+                "day_change_percent": float(day_change_pct),
+                "unrealized_gain_value": float(unrealized) if unrealized is not None else None,
+                "unrealized_gain_percent": float(unrealized_pct) if unrealized_pct is not None else None,
+                "realized_gain_value": float(realized),
+            }
+        )
+
+    return {
+        "portfolio_id": portfolio_id,
+        "as_of": latest.as_of.date().isoformat(),
+        "holdings": rows,
+    }
+
+
+def get_portfolio_equity_history(db: Session, portfolio_id: str, *, range_label: str = "6M") -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    latest = _latest_valuation_snapshot_or_error(db, portfolio_id)
+    start_date = _range_start_from_label(latest.as_of.date(), range_label)
+
+    rows = (
+        db.query(ValuationSnapshot)
+        .filter(ValuationSnapshot.portfolio_id == portfolio_id)
+        .order_by(ValuationSnapshot.as_of.asc(), ValuationSnapshot.valuation_version.asc(), ValuationSnapshot.created_at.asc())
+        .all()
+    )
+    if start_date is not None:
+        rows = [r for r in rows if r.as_of.date() >= start_date]
+
+    if not rows:
+        return {"portfolio_id": portfolio_id, "range": range_label.upper(), "series": []}
+
+    ledger_ids = {r.ledger_snapshot_id for r in rows if r.ledger_snapshot_id}
+    ledgers = (
+        db.query(LedgerSnapshot)
+        .filter(LedgerSnapshot.id.in_(ledger_ids))
+        .all()
+    )
+    ledger_by_id = {l.id: l for l in ledgers}
+
+    by_date: dict[str, dict[str, object]] = {}
+    for row in rows:
+        ledger = ledger_by_id.get(row.ledger_snapshot_id)
+        cash = Decimal(str(float(ledger.cash or 0.0))) if ledger else Decimal("0")
+        market = Decimal(str(float(row.nav or 0.0)))
+        total_equity = (cash + market).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        date_key = row.as_of.date().isoformat()
+        by_date[date_key] = {
+            "date": date_key,
+            "total_equity": float(total_equity),
+        }
+
+    series = [by_date[k] for k in sorted(by_date.keys())]
+    return {"portfolio_id": portfolio_id, "range": range_label.upper(), "series": series}
+
+
 def _load_portfolio_transactions_from_db(db: Session, portfolio_id: str) -> list[Transaction]:
     rows = (
         db.query(PortfolioTransaction)

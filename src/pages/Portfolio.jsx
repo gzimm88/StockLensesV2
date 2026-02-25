@@ -1,5 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Button } from "@/components/ui/button";
 import { createPageUrl } from "@/utils";
 import { Ticker } from "@/api/entities";
@@ -7,6 +8,9 @@ import {
   createPortfolio,
   createPortfolioTransaction,
   deletePortfolioTransaction,
+  getPortfolioDashboardSummary,
+  getPortfolioEquityHistory,
+  getPortfolioHoldings,
   getLastPortfolioRun,
   getValuationAttribution,
   getValuationDiff,
@@ -39,6 +43,16 @@ function shortHash(hash) {
   return hash.length > 16 ? `${hash.slice(0, 16)}...` : hash;
 }
 
+function fmtNumber(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function fmtPercent(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${fmtNumber(value, digits)}%`;
+}
+
 const EMPTY_TX = {
   ticker: "",
   type: "Buy",
@@ -67,6 +81,10 @@ export default function Portfolio() {
   const [transactions, setTransactions] = React.useState([]);
   const [valuationAttribution, setValuationAttribution] = React.useState(null);
   const [valuationDiff, setValuationDiff] = React.useState(null);
+  const [dashboardSummary, setDashboardSummary] = React.useState(null);
+  const [holdingsRows, setHoldingsRows] = React.useState([]);
+  const [equityRange, setEquityRange] = React.useState("6M");
+  const [equitySeries, setEquitySeries] = React.useState([]);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
@@ -114,13 +132,19 @@ export default function Portfolio() {
         setTransactions([]);
         setValuationAttribution(null);
         setValuationDiff(null);
+        setDashboardSummary(null);
+        setHoldingsRows([]);
+        setEquitySeries([]);
         return;
       }
-      const [last, latestMeta, attribution, diff] = await Promise.all([
+      const [last, latestMeta, attribution, diff, summary, holdings, history] = await Promise.all([
         getLastPortfolioRun(portfolioId),
         getLatestPortfolioRunMetadata(portfolioId),
         getValuationAttribution(portfolioId),
         getValuationDiff(portfolioId),
+        getPortfolioDashboardSummary(portfolioId),
+        getPortfolioHoldings(portfolioId),
+        getPortfolioEquityHistory(portfolioId, equityRange),
       ]);
       const lastData = last?.data || null;
       const metaData = latestMeta?.data || null;
@@ -128,9 +152,12 @@ export default function Portfolio() {
       setMetadata(metaData);
       setValuationAttribution(attribution?.data || null);
       setValuationDiff(diff?.data || null);
+      setDashboardSummary(summary?.data || null);
+      setHoldingsRows(holdings?.data?.holdings || []);
+      setEquitySeries(history?.data?.series || []);
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions]
+    [loadTransactions, equityRange]
   );
 
   React.useEffect(() => {
@@ -160,6 +187,9 @@ export default function Portfolio() {
       setTransactions([]);
       setValuationAttribution(null);
       setValuationDiff(null);
+      setDashboardSummary(null);
+      setHoldingsRows([]);
+      setEquitySeries([]);
       setTxDirty(false);
       setError("");
     if (!selectedPortfolioId) return;
@@ -171,6 +201,18 @@ export default function Portfolio() {
       }
     })();
   }, [selectedPortfolioId, loadPortfolioState]);
+
+  React.useEffect(() => {
+    if (!selectedPortfolioId) return;
+    (async () => {
+      try {
+        const history = await getPortfolioEquityHistory(selectedPortfolioId, equityRange);
+        setEquitySeries(history?.data?.series || []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load equity history.");
+      }
+    })();
+  }, [selectedPortfolioId, equityRange]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -216,7 +258,7 @@ export default function Portfolio() {
       setResult(response?.data || null);
       const latestMeta = await getLatestPortfolioRunMetadata(selectedPortfolioId);
       setMetadata(latestMeta?.data || null);
-      await loadTransactions(selectedPortfolioId, latestMeta?.data?.finished_at || null);
+      await loadPortfolioState(selectedPortfolioId);
       setTxDirty(false);
       await loadPortfolios();
     } catch (err) {
@@ -406,9 +448,80 @@ export default function Portfolio() {
                 </div>
               )}
               <div className="grid md:grid-cols-3 gap-3 text-sm">
-                <div><p className="text-slate-500">NAV (Total Equity)</p><p className="font-medium">{result?.nav ?? "-"}</p></div>
-                <div><p className="text-slate-500">IRR</p><p className="font-medium">{result?.irr ?? "-"}</p></div>
+                <div><p className="text-slate-500">Total Equity</p><p className="font-medium">{fmtNumber(dashboardSummary?.total_equity)}</p></div>
+                <div>
+                  <p className="text-slate-500">Day Change</p>
+                  <p className="font-medium">{fmtNumber(dashboardSummary?.day_change_value)} ({fmtPercent(dashboardSummary?.day_change_percent)})</p>
+                </div>
+                <div>
+                  <p className="text-slate-500">Unrealized Gain/Loss</p>
+                  <p className="font-medium">{fmtNumber(dashboardSummary?.unrealized_gain_value)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
+                </div>
+                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtNumber(dashboardSummary?.realized_gain_value)}</p></div>
+                <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtNumber(dashboardSummary?.cash_balance)}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
+              </div>
+
+              <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold">Equity Curve</h3>
+                  <select
+                    value={equityRange}
+                    onChange={(e) => setEquityRange(e.target.value)}
+                    className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
+                  >
+                    {["1M", "3M", "6M", "1Y", "5Y", "MAX"].map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={equitySeries}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip formatter={(v) => fmtNumber(v)} />
+                      <Line type="monotone" dataKey="total_equity" stroke="#0f172a" dot={false} strokeWidth={2} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <h3 className="text-sm font-semibold mb-2">Holdings</h3>
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-2">Ticker</th>
+                      <th className="text-left py-2">Quantity</th>
+                      <th className="text-left py-2">Avg Cost</th>
+                      <th className="text-left py-2">Total Cost Basis</th>
+                      <th className="text-left py-2">Market Price</th>
+                      <th className="text-left py-2">Market Value</th>
+                      <th className="text-left py-2">Day Change</th>
+                      <th className="text-left py-2">Unrealized</th>
+                      <th className="text-left py-2">Realized</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {holdingsRows.length === 0 ? (
+                      <tr><td colSpan={9} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                    ) : (
+                      holdingsRows.map((row) => (
+                        <tr key={row.ticker} className="border-b">
+                          <td className="py-2 font-mono">{row.ticker}</td>
+                          <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
+                          <td className="py-2">{fmtNumber(row.avg_cost_basis, 4)}</td>
+                          <td className="py-2">{fmtNumber(row.total_cost_basis)}</td>
+                          <td className="py-2">{fmtNumber(row.market_price, 4)}</td>
+                          <td className="py-2">{fmtNumber(row.market_value)}</td>
+                          <td className="py-2">{fmtNumber(row.day_change_value)} ({fmtPercent(row.day_change_percent)})</td>
+                          <td className="py-2">{fmtNumber(row.unrealized_gain_value)} ({fmtPercent(row.unrealized_gain_percent)})</td>
+                          <td className="py-2">{fmtNumber(row.realized_gain_value)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
               <details>
                 <summary className="cursor-pointer text-base font-semibold">Processing Metadata</summary>

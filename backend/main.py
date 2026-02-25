@@ -26,6 +26,7 @@ from backend.models import (
     PortfolioCorrectionEvent,
     PortfolioCoverageEvent,
     PortfolioProcessingRun,
+    PortfolioSettings,
     PortfolioTransaction,
     PricesHistory,
     ScoreSnapshot,
@@ -45,6 +46,9 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
     create_portfolio,
+    get_portfolio_dashboard_summary,
+    get_portfolio_equity_history,
+    get_portfolio_holdings,
     get_latest_valuation_attribution,
     get_latest_valuation_diff,
     get_or_create_default_portfolio,
@@ -164,6 +168,35 @@ def _ensure_phase6_schema() -> None:
 
 
 _ensure_phase6_schema()
+
+
+def _ensure_phase9_schema() -> None:
+    with engine.begin() as conn:
+        tx_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_transactions)"))}
+        if tx_cols and "fx_at_execution" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN fx_at_execution FLOAT NOT NULL DEFAULT 1.0"))
+        if tx_cols and "gross_amount_base" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN gross_amount_base FLOAT NOT NULL DEFAULT 0.0"))
+        # Backfill immutable booking facts for existing rows where possible.
+        conn.execute(
+            text(
+                """
+                UPDATE portfolio_transactions
+                SET
+                    fx_at_execution = CASE
+                        WHEN fx_at_execution IS NULL OR fx_at_execution = 0 THEN 1.0
+                        ELSE fx_at_execution
+                    END,
+                    gross_amount_base = CASE
+                        WHEN gross_amount_base IS NULL OR gross_amount_base = 0 THEN gross_amount
+                        ELSE gross_amount_base
+                    END
+                """
+            )
+        )
+
+
+_ensure_phase9_schema()
 
 
 def _bootstrap_default_portfolio() -> None:
@@ -540,6 +573,49 @@ def get_portfolio_valuation_diff(portfolio_id: str, db: Session = Depends(get_db
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio valuation diff loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/dashboard-summary", response_model=PortfolioProcessResponse)
+def get_portfolio_dashboard_summary_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_portfolio_dashboard_summary(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio dashboard summary loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/holdings", response_model=PortfolioProcessResponse)
+def get_portfolio_holdings_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_portfolio_holdings(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio holdings loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/equity-history", response_model=PortfolioProcessResponse)
+def get_portfolio_equity_history_route(
+    portfolio_id: str,
+    range: str = Query(default="6M"),
+    db: Session = Depends(get_db),
+):
+    try:
+        data = get_portfolio_equity_history(db, portfolio_id, range_label=range)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio equity history loaded",
         data=data,
     )
 
