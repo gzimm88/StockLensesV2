@@ -76,6 +76,14 @@ function fmtPercent(value, digits = 2) {
   return `${fmtNumber(value, digits)}%`;
 }
 
+function fmtAxisNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
 function parseIsoDate(value) {
   if (!value || typeof value !== "string") return null;
   const d = new Date(`${value}T00:00:00Z`);
@@ -754,11 +762,19 @@ export default function Portfolio() {
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
-                      <XAxis dataKey="date" tickFormatter={formatYahooXAxisTick} minTickGap={24} tickMargin={8} />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={formatYahooXAxisTick}
+                        minTickGap={24}
+                        tickMargin={8}
+                        tick={{ fontSize: 10, fill: "#94a3b8", fontWeight: 400 }}
+                      />
                       <YAxis
                         orientation="right"
-                        tickFormatter={(v) => (performanceMode === "growth" ? fmtPercent(v) : fmtNumber(v))}
+                        tickFormatter={(v) => (performanceMode === "growth" ? fmtPercent(v) : fmtAxisNumber(v))}
                         tickMargin={6}
+                        tick={{ fontSize: 9, fill: "#94a3b8", fontWeight: 400 }}
+                        width={58}
                       />
                       <Tooltip
                         cursor={{ stroke: "#64748b", strokeDasharray: "4 4" }}
@@ -773,22 +789,17 @@ export default function Portfolio() {
                           y={latestEquityPoint.plotted_value}
                           stroke="#10b981"
                           strokeDasharray="6 6"
-                          label={{
-                            position: "right",
-                            value: rightSideMetric,
-                            fill: "#065f46",
-                          }}
                         />
                       )}
                       <Line type="monotone" dataKey="plotted_value" stroke="#0ea5e9" dot={false} strokeWidth={2.5} />
                     </AreaChart>
                   </ResponsiveContainer>
-                  <div className="absolute right-2 top-10 px-2 py-0.5 rounded text-white bg-emerald-700 text-xs font-medium">
+                  <div className="absolute right-2 top-10 px-2 py-0.5 rounded text-white bg-emerald-700 text-[10px] font-medium leading-4">
                     {rightSideMetric}
                   </div>
                   {hoveredEquity?.date && (
                     <div
-                      className="absolute px-2 py-0.5 rounded text-white bg-slate-800 text-xs"
+                      className="absolute px-2 py-0.5 rounded text-white bg-slate-800 text-[10px] leading-4"
                       style={{ left: `calc(${hoveredEquity.x}px - 45px)`, bottom: 2 }}
                     >
                       {new Date(`${hoveredEquity.date}T00:00:00Z`).toLocaleDateString("en-US")}
