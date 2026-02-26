@@ -125,7 +125,7 @@ export default function Portfolio() {
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
   const [performanceMode, setPerformanceMode] = React.useState("value");
-  const [hoveredEquityDate, setHoveredEquityDate] = React.useState("");
+  const [hoveredEquity, setHoveredEquity] = React.useState(null);
   const [equitySeries, setEquitySeries] = React.useState([]);
   const [portfolioSettings, setPortfolioSettings] = React.useState(null);
   const [isSavingSettings, setIsSavingSettings] = React.useState(false);
@@ -144,8 +144,8 @@ export default function Portfolio() {
   const equityPerformanceMode = performanceMode === "growth" ? "net_of_contributions" : "absolute";
   const latestEquityPoint = equitySeries.length > 0 ? equitySeries[equitySeries.length - 1] : null;
   const rightSideMetric = performanceMode === "growth"
-    ? fmtPercent(latestEquityPoint?.twr_return_pct)
-    : fmtCurrency(latestEquityPoint?.plotted_value, displayCurrency);
+    ? fmtPercent((hoveredEquity?.twr_return_pct ?? latestEquityPoint?.twr_return_pct))
+    : fmtCurrency((hoveredEquity?.plotted_value ?? latestEquityPoint?.plotted_value), displayCurrency);
 
   const sortedHoldingsRows = React.useMemo(() => {
     const rows = holdingsRows.map((row) => {
@@ -173,6 +173,11 @@ export default function Portfolio() {
     }
     setHoldingsSortField(field);
     setHoldingsSortDirection("desc");
+  };
+
+  const sortIndicator = (field) => {
+    if (holdingsSortField !== field) return "";
+    return holdingsSortDirection === "desc" ? "▾" : "▴";
   };
 
   const loadPortfolios = React.useCallback(async () => {
@@ -720,16 +725,27 @@ export default function Portfolio() {
                     </select>
                   </div>
                 </div>
-                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-2">
-                  <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-                    <span>{hoveredEquityDate || ""}</span>
-                    <span className="font-semibold text-emerald-700">{rightSideMetric}</span>
-                  </div>
+                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-2 relative">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart
                       data={equitySeries}
-                      onMouseMove={(state) => setHoveredEquityDate(state?.activePayload?.[0]?.payload?.date || "")}
-                      onMouseLeave={() => setHoveredEquityDate("")}
+                      margin={{ top: 8, right: 62, left: 8, bottom: 28 }}
+                      onMouseMove={(state) => {
+                        const p = state?.activePayload?.[0]?.payload;
+                        const c = state?.activeCoordinate;
+                        if (!p || !c) {
+                          setHoveredEquity(null);
+                          return;
+                        }
+                        setHoveredEquity({
+                          date: p.date,
+                          plotted_value: p.plotted_value,
+                          twr_return_pct: p.twr_return_pct,
+                          x: c.x,
+                          y: c.y,
+                        });
+                      }}
+                      onMouseLeave={() => setHoveredEquity(null)}
                     >
                       <defs>
                         <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
@@ -738,26 +754,20 @@ export default function Portfolio() {
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
-                      <XAxis dataKey="date" tickFormatter={formatYahooXAxisTick} minTickGap={22} />
-                      <YAxis orientation="left" />
+                      <XAxis dataKey="date" tickFormatter={formatYahooXAxisTick} minTickGap={24} tickMargin={8} />
+                      <YAxis
+                        orientation="right"
+                        tickFormatter={(v) => (performanceMode === "growth" ? fmtPercent(v) : fmtNumber(v))}
+                        tickMargin={6}
+                      />
                       <Tooltip
-                        contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0" }}
-                        formatter={(v, __, item) => {
-                          const row = item?.payload;
-                          return [
-                            performanceMode === "growth"
-                              ? fmtPercent(row?.twr_return_pct)
-                              : fmtCurrency(v, displayCurrency),
-                            performanceMode === "growth" ? "Growth" : "Value",
-                          ];
-                        }}
-                        labelFormatter={(_, payload) => {
-                          const row = payload?.[0]?.payload;
-                          return row?.date || "";
-                        }}
-                        position={{ x: 12, y: 18 }}
+                        cursor={{ stroke: "#64748b", strokeDasharray: "4 4" }}
+                        content={() => null}
                       />
                       <Area type="monotone" dataKey="plotted_value" stroke="none" fill="url(#equityFill)" />
+                      {hoveredEquity && (
+                        <ReferenceLine y={hoveredEquity.plotted_value} stroke="#94a3b8" strokeDasharray="4 4" />
+                      )}
                       {latestEquityPoint && (
                         <ReferenceLine
                           y={latestEquityPoint.plotted_value}
@@ -773,56 +783,76 @@ export default function Portfolio() {
                       <Line type="monotone" dataKey="plotted_value" stroke="#0ea5e9" dot={false} strokeWidth={2.5} />
                     </AreaChart>
                   </ResponsiveContainer>
+                  <div className="absolute right-2 top-10 px-2 py-0.5 rounded text-white bg-emerald-700 text-xs font-medium">
+                    {rightSideMetric}
+                  </div>
+                  {hoveredEquity?.date && (
+                    <div
+                      className="absolute px-2 py-0.5 rounded text-white bg-slate-800 text-xs"
+                      style={{ left: `calc(${hoveredEquity.x}px - 45px)`, bottom: 2 }}
+                    >
+                      {new Date(`${hoveredEquity.date}T00:00:00Z`).toLocaleDateString("en-US")}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="overflow-x-auto">
-                <h3 className="text-sm font-semibold mb-2">Holdings</h3>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">Holdings</h3>
+                  <span className="text-xs text-slate-500">
+                    Sorted by {holdingsSortField.replaceAll("_", " ")} {holdingsSortDirection === "desc" ? "↓" : "↑"}
+                  </span>
+                </div>
                 <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr className="border-b bg-slate-50">
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("ticker")}>Symbol</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("quantity")}>Shares</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("avg_cost_basis")}>AC/Share</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost ({displayCurrency})</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("market_price")}>Last Price</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("market_value")}>Market Value ({displayCurrency})</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("day_change_percent")}>Day Gain (%)</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain ({displayCurrency})</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("unrealized_gain_percent")}>Tot Gain UNRL (%)</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL ({displayCurrency})</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("realized_gain_percent")}>Realized Gain (%)</button></th>
-                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("realized_gain_value")}>Realized Gain ({displayCurrency})</button></th>
+                    <tr className="border-b bg-slate-900 text-slate-100">
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("ticker")}>Symbol {sortIndicator("ticker")}</button></th>
+                      <th className="text-left py-2 px-2">Status</th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("quantity")}>Shares {sortIndicator("quantity")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_price")}>Last Price {sortIndicator("market_price")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("avg_cost_basis")}>AC/Share {sortIndicator("avg_cost_basis")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost ({displayCurrency}) {sortIndicator("total_cost_basis")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_value")}>Market Value ({displayCurrency}) {sortIndicator("market_value")}</button></th>
+                      <th className="text-left py-2 px-2">Tot Div Income ({displayCurrency})</th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_percent")}>Day Gain UNRL (%) {sortIndicator("day_change_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain UNRL ({displayCurrency}) {sortIndicator("day_change_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_percent")}>Tot Gain UNRL (%) {sortIndicator("unrealized_gain_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL ({displayCurrency}) {sortIndicator("unrealized_gain_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_percent")}>Realized Gain (%) {sortIndicator("realized_gain_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_value")}>Realized Gain ({displayCurrency}) {sortIndicator("realized_gain_value")}</button></th>
                     </tr>
                   </thead>
                   <tbody>
                     {holdingsRows.length === 0 ? (
-                      <tr><td colSpan={12} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                      <tr><td colSpan={14} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
                       sortedHoldingsRows.map((row) => (
                         <tr key={row.ticker} className="border-b hover:bg-slate-50">
-                          <td className="py-2 font-mono">{row.ticker}</td>
-                          <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
-                          <td className="py-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
-                          <td className={`py-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className="py-2 px-2 font-mono text-blue-700">{row.ticker}</td>
+                          <td className="py-2 px-2">Open</td>
+                          <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
+                          <td className="py-2 px-2">--</td>
+                          <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtPercent(row.day_change_percent)}
                           </td>
-                          <td className={`py-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className={`py-2 px-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.day_change_value, displayCurrency)}
                           </td>
-                          <td className={`py-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtPercent(row.unrealized_gain_percent)}
                           </td>
-                          <td className={`py-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
                           </td>
-                          <td className={`py-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className={`py-2 px-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
                           </td>
-                          <td className={`py-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                          <td className={`py-2 px-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.realized_gain_value, displayCurrency)}
                           </td>
                         </tr>
