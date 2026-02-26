@@ -104,13 +104,41 @@ export async function getPortfolioHoldings(portfolioId) {
 
 export async function getPortfolioEquityHistory(portfolioId, range = "6M") {
   const q = encodeURIComponent(range || "6M");
+  const defaultPerf = "absolute";
   try {
-    return await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/equity-history?range=${q}`, { method: "GET" });
+    return await apiFetch(
+      `/portfolios/${encodeURIComponent(portfolioId)}/equity-history?range=${q}&performance_mode=${defaultPerf}&show_fx_impact=false`,
+      { method: "GET" }
+    );
   } catch (err) {
     const msg = String(err?.message || "");
     if (msg.includes("404") || msg.includes("No valuation snapshot found")) return null;
     throw err;
   }
+}
+
+export async function getPortfolioEquityHistorySeries(
+  portfolioId,
+  { range = "6M", performanceMode = "absolute", showFxImpact = false } = {}
+) {
+  const q = encodeURIComponent(range || "6M");
+  const perf = encodeURIComponent(performanceMode || "absolute");
+  const showFx = showFxImpact ? "true" : "false";
+  return apiFetch(
+    `/portfolios/${encodeURIComponent(portfolioId)}/equity-history?range=${q}&performance_mode=${perf}&show_fx_impact=${showFx}`,
+    { method: "GET" }
+  );
+}
+
+export async function getPortfolioSettings(portfolioId) {
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/settings`, { method: "GET" });
+}
+
+export async function updatePortfolioSettings(portfolioId, payload) {
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/settings`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function listPortfolioTransactions(portfolioId) {

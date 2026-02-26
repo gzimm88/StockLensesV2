@@ -9,8 +9,9 @@ import {
   createPortfolioTransaction,
   deletePortfolioTransaction,
   getPortfolioDashboardSummary,
-  getPortfolioEquityHistory,
+  getPortfolioEquityHistorySeries,
   getPortfolioHoldings,
+  getPortfolioSettings,
   getLastPortfolioRun,
   getValuationAttribution,
   getValuationDiff,
@@ -19,6 +20,7 @@ import {
   listPortfolioTransactions,
   listPortfolios,
   processPortfolio,
+  updatePortfolioSettings,
   updatePortfolioTransaction,
 } from "@/api/portfolio";
 import AttributionPanel from "@/components/portfolio/AttributionPanel";
@@ -85,7 +87,11 @@ export default function Portfolio() {
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
+  const [performanceMode, setPerformanceMode] = React.useState("absolute");
+  const [showFxImpact, setShowFxImpact] = React.useState(false);
   const [equitySeries, setEquitySeries] = React.useState([]);
+  const [portfolioSettings, setPortfolioSettings] = React.useState(null);
+  const [isSavingSettings, setIsSavingSettings] = React.useState(false);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
@@ -136,6 +142,7 @@ export default function Portfolio() {
         setDashboardSummary(null);
         setHoldingsRows([]);
         setEquitySeries([]);
+        setPortfolioSettings(null);
         setEquityHistoryNotice("");
         return;
       }
@@ -146,7 +153,12 @@ export default function Portfolio() {
         getValuationDiff(portfolioId),
         getPortfolioDashboardSummary(portfolioId),
         getPortfolioHoldings(portfolioId),
-        getPortfolioEquityHistory(portfolioId, equityRange),
+        getPortfolioEquityHistorySeries(portfolioId, {
+          range: equityRange,
+          performanceMode,
+          showFxImpact,
+        }),
+        getPortfolioSettings(portfolioId),
       ]);
 
       const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
@@ -162,6 +174,7 @@ export default function Portfolio() {
       const summaryData = getSettledData(4);
       const holdingsData = getSettledData(5);
       const historyData = getSettledData(6);
+      const settingsData = getSettledData(7);
 
       const summaryErr = getSettledError(4);
       const historyErr = getSettledError(6);
@@ -174,6 +187,7 @@ export default function Portfolio() {
       setDashboardSummary(summaryData);
       setHoldingsRows(holdingsData?.holdings || []);
       setEquitySeries(historyData?.series || []);
+      setPortfolioSettings(settingsData);
       setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
 
       const nonHistoryErrors = [
@@ -182,6 +196,7 @@ export default function Portfolio() {
         getSettledError(2),
         getSettledError(3),
         getSettledError(5),
+        getSettledError(7),
       ].filter(Boolean);
       const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
       const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
@@ -191,7 +206,7 @@ export default function Portfolio() {
 
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions, equityRange]
+    [loadTransactions, equityRange, performanceMode, showFxImpact]
   );
 
   React.useEffect(() => {
@@ -224,6 +239,7 @@ export default function Portfolio() {
       setDashboardSummary(null);
       setHoldingsRows([]);
       setEquitySeries([]);
+      setPortfolioSettings(null);
       setEquityHistoryNotice("");
       setTxDirty(false);
       setError("");
@@ -241,13 +257,17 @@ export default function Portfolio() {
     if (!selectedPortfolioId) return;
     (async () => {
       try {
-        const history = await getPortfolioEquityHistory(selectedPortfolioId, equityRange);
+        const history = await getPortfolioEquityHistorySeries(selectedPortfolioId, {
+          range: equityRange,
+          performanceMode,
+          showFxImpact,
+        });
         setEquitySeries(history?.data?.series || []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load equity history.");
       }
     })();
-  }, [selectedPortfolioId, equityRange]);
+  }, [selectedPortfolioId, equityRange, performanceMode, showFxImpact]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -357,6 +377,7 @@ export default function Portfolio() {
 
   const deleteTx = async (txId) => {
     if (!selectedPortfolioId) return;
+    if (!window.confirm("Delete this transaction? This action is soft-delete and will require rebuild.")) return;
     setError("");
     try {
       await deletePortfolioTransaction(selectedPortfolioId, txId);
@@ -364,6 +385,21 @@ export default function Portfolio() {
       setTxDirty(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete transaction.");
+    }
+  };
+
+  const saveSettings = async (next) => {
+    if (!selectedPortfolioId) return;
+    setIsSavingSettings(true);
+    setError("");
+    try {
+      const res = await updatePortfolioSettings(selectedPortfolioId, next);
+      setPortfolioSettings(res?.data || null);
+      await loadPortfolioState(selectedPortfolioId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update portfolio settings.");
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -419,6 +455,55 @@ export default function Portfolio() {
             <input type="checkbox" checked={strictMode} onChange={(e) => setStrictMode(e.target.checked)} />
             Strict Coverage Mode (passes <code>strict=true</code>)
           </label>
+        </div>
+
+        <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3 space-y-2">
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">Portfolio Settings</p>
+          <div className="grid md:grid-cols-2 gap-2 text-sm">
+            <div>
+              <p className="text-slate-500">Base Currency</p>
+              <p className="font-medium">{portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD"}</p>
+            </div>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={(portfolioSettings?.cash_management_mode || "track_cash") === "track_cash"}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    cash_management_mode: e.target.checked ? "track_cash" : "ignore_cash",
+                  })
+                }
+              />
+              Track cash balance
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={Boolean(portfolioSettings?.include_dividends_in_performance ?? true)}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    include_dividends_in_performance: e.target.checked,
+                  })
+                }
+              />
+              Include dividends in performance
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={Boolean(portfolioSettings?.reinvest_dividends_overlay ?? false)}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    reinvest_dividends_overlay: e.target.checked,
+                  })
+                }
+              />
+              Reinvest dividends overlay
+            </label>
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -497,6 +582,8 @@ export default function Portfolio() {
                   <p className="text-slate-500">Unrealized Gain/Loss</p>
                   <p className="font-medium">{fmtNumber(dashboardSummary?.unrealized_gain_value)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
                 </div>
+                <div><p className="text-slate-500">Market Move Component</p><p className="font-medium">{fmtNumber(dashboardSummary?.market_move_component)}</p></div>
+                <div><p className="text-slate-500">Currency Move Component</p><p className="font-medium">{fmtNumber(dashboardSummary?.currency_move_component)}</p></div>
                 <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtNumber(dashboardSummary?.realized_gain_value)}</p></div>
                 <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtNumber(dashboardSummary?.cash_balance)}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
@@ -505,13 +592,28 @@ export default function Portfolio() {
               <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold">Equity Curve</h3>
-                  <select
-                    value={equityRange}
-                    onChange={(e) => setEquityRange(e.target.value)}
-                    className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
-                  >
-                    {["1M", "3M", "6M", "1Y", "5Y", "MAX"].map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={performanceMode}
+                      onChange={(e) => setPerformanceMode(e.target.value)}
+                      className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
+                    >
+                      <option value="absolute">Absolute Value</option>
+                      <option value="twr">Time-Weighted Return</option>
+                      <option value="net_of_contributions">Net of Contributions</option>
+                    </select>
+                    <label className="text-xs flex items-center gap-1">
+                      <input type="checkbox" checked={showFxImpact} onChange={(e) => setShowFxImpact(e.target.checked)} />
+                      Show FX Impact
+                    </label>
+                    <select
+                      value={equityRange}
+                      onChange={(e) => setEquityRange(e.target.value)}
+                      className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
+                    >
+                      {["1D", "5D", "1M", "3M", "6M", "1Y", "5Y", "MAX"].map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
                 </div>
                 <div className="h-56">
                   <ResponsiveContainer width="100%" height="100%">
@@ -519,8 +621,15 @@ export default function Portfolio() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="date" />
                       <YAxis />
-                      <Tooltip formatter={(v) => fmtNumber(v)} />
-                      <Line type="monotone" dataKey="total_equity" stroke="#0f172a" dot={false} strokeWidth={2} />
+                      <Tooltip
+                        formatter={(v) => fmtNumber(v)}
+                        labelFormatter={(label, payload) => {
+                          const row = payload?.[0]?.payload;
+                          if (!row) return label;
+                          return `${label} | Total ${fmtNumber(row.total_equity)} | Day ${fmtNumber(row.day_change_value)} | CumRet ${fmtPercent(row.twr_return_pct)} | NetContrib ${fmtNumber(row.cumulative_net_contribution)}`;
+                        }}
+                      />
+                      <Line type="monotone" dataKey="plotted_value" stroke="#0f172a" dot={false} strokeWidth={2} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -538,13 +647,16 @@ export default function Portfolio() {
                       <th className="text-left py-2">Market Price</th>
                       <th className="text-left py-2">Market Value</th>
                       <th className="text-left py-2">Day Change</th>
+                      <th className="text-left py-2">Price Return</th>
+                      <th className="text-left py-2">FX Return</th>
+                      <th className="text-left py-2">Combined</th>
                       <th className="text-left py-2">Unrealized</th>
                       <th className="text-left py-2">Realized</th>
                     </tr>
                   </thead>
                   <tbody>
                     {holdingsRows.length === 0 ? (
-                      <tr><td colSpan={9} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                      <tr><td colSpan={12} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
                       holdingsRows.map((row) => (
                         <tr key={row.ticker} className="border-b">
@@ -555,6 +667,9 @@ export default function Portfolio() {
                           <td className="py-2">{fmtNumber(row.market_price, 4)}</td>
                           <td className="py-2">{fmtNumber(row.market_value)}</td>
                           <td className="py-2">{fmtNumber(row.day_change_value)} ({fmtPercent(row.day_change_percent)})</td>
+                          <td className="py-2">{fmtNumber(row.price_return_value)}</td>
+                          <td className="py-2">{fmtNumber(row.fx_return_value)}</td>
+                          <td className="py-2">{fmtNumber(row.combined_return_value)}</td>
                           <td className="py-2">{fmtNumber(row.unrealized_gain_value)} ({fmtPercent(row.unrealized_gain_percent)})</td>
                           <td className="py-2">{fmtNumber(row.realized_gain_value)}</td>
                         </tr>
@@ -641,7 +756,7 @@ export default function Portfolio() {
                         <td className="py-2">{tx.type}</td>
                         <td className="py-2">{tx.shares}</td>
                         <td className="py-2">{tx.price}</td>
-                        <td className="py-2">{tx.total}</td>
+                        <td className="py-2">{fmtNumber((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0))}</td>
                         <td className="py-2">
                           <div className="flex gap-2">
                             <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>
