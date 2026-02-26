@@ -685,7 +685,7 @@ export default function Screener() {
   const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [minScoreFilter, setMinScoreFilter] = useState(0);
 
-  const [buyMin, setBuyMin]     = useState(6.5);
+  const [buyMin, setBuyMin]     = useState(7.1);
   const [watchMin, setWatchMin] = useState(4.5);
 
   const [isBulkUpdating, setIsBulkUpdating] = useState(false);
@@ -704,7 +704,7 @@ export default function Screener() {
   useEffect(() => {
     if (selectedLens) {
       const cfg = lensRec[selectedLens.name] || lensRec["Conservative"];
-      setBuyMin(cfg.buy ?? 6.5);
+      setBuyMin(cfg.buy ?? 7.1);
       setWatchMin(cfg.watch ?? 4.5);
     }
   }, [selectedLens]);
@@ -855,7 +855,7 @@ export default function Screener() {
         selectedLens.name,
         item.recommendation,
         item.finalScore.toFixed(2),
-        lensConfig.buy || 6.5,
+        lensConfig.buy || 7.1,
         lensConfig.watch || 4.5,
 
         item.mosSig ?? '',
@@ -890,7 +890,7 @@ export default function Screener() {
     URL.revokeObjectURL(url);
   };
 
-  const getScoreColor = (score, buyMin = 6.5, watchMin = 4.5) => {
+  const getScoreColor = (score, buyMin = 7.1, watchMin = 4.5) => {
     if (score >= buyMin)   return "text-green-700 bg-green-50";
     if (score >= watchMin) return "text-amber-700 bg-amber-50";
     if (score >= 3)        return "text-orange-700 bg-orange-50";
@@ -1301,7 +1301,7 @@ export default function Screener() {
                     />
 
                     <div className="text-xs text-slate-500 bg-white px-2 py-1 rounded border">
-                        Buy ≥{(lensConfig.buy || 6.5).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
+                        Buy ≥{(lensConfig.buy || 7.1).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
                     </div>
 
                 </div>
@@ -1431,7 +1431,7 @@ export default function Screener() {
                                                 <p className="font-semibold">Based on {selectedLens.name}</p>
                                                 {lensConfig && (
                                                     <p>
-                                                      Buy≥{(lensConfig.buy || 6.5).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}
+                                                      Buy≥{(lensConfig.buy || 7.1).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}
                                                       {lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}
                                                       {lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}
                                                     </p>

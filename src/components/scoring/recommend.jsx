@@ -28,26 +28,16 @@ export function recommend(score, arg2 = {}, arg3 = {}) {
     ? (hasConfVal ? (confidence >= confRequired ? "✓" : "✕") : "-")
     : null;
 
-  if (!hasMOSReq && !hasConfReq) {
-    if (score >= buyMin) return { rec: "BUY", mosStatus: null, confStatus: null };
-    if (score >= watchMin) return { rec: "WATCH", mosStatus: null, confStatus: null };
-    return { rec: "AVOID", mosStatus: null, confStatus: null };
+  // Recommendation is score-only. MOS and confidence are audit/display signals.
+  const rec = score >= buyMin ? "BUY" : score >= watchMin ? "WATCH" : "AVOID";
+
+  let mosStatus = null;
+  if (hasMOSReq) {
+    if (!hasMOSVal) mosStatus = "-";
+    else mosStatus = mos >= mosRequired ? "✓" : "✕";
   }
 
-  if (hasMOSVal) {
-    const mosPass = mos >= mosRequired;
-    if (score >= buyMin && mosPass && confPass) {
-      return { rec: "BUY", mosStatus: hasMOSReq ? "✓" : null, confStatus };
-    }
-    if (score >= watchMin) {
-      return { rec: "WATCH", mosStatus: hasMOSReq ? (mosPass ? "✓" : "✕") : null, confStatus };
-    }
-    return { rec: "AVOID", mosStatus: hasMOSReq ? "✕" : null, confStatus };
-  }
-
-  if (score >= buyMin) return { rec: "WATCH", mosStatus: hasMOSReq ? "-" : null, confStatus };
-  if (score >= watchMin) return { rec: "WATCH", mosStatus: hasMOSReq ? "-" : null, confStatus };
-  return { rec: "AVOID", mosStatus: hasMOSReq ? "-" : null, confStatus };
+  return { rec, mosStatus, confStatus };
 }
 
 /**
