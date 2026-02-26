@@ -1,6 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,6 +76,22 @@ function fmtPercent(value, digits = 2) {
   return `${fmtNumber(value, digits)}%`;
 }
 
+function parseIsoDate(value) {
+  if (!value || typeof value !== "string") return null;
+  const d = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatYahooXAxisTick(value) {
+  const d = parseIsoDate(value);
+  if (!d) return "";
+  const day = d.getUTCDate();
+  if (day <= 7) {
+    return d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+  }
+  return `${day}`;
+}
+
 const EMPTY_TX = {
   ticker: "",
   type: "Buy",
@@ -109,6 +125,7 @@ export default function Portfolio() {
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
   const [performanceMode, setPerformanceMode] = React.useState("value");
+  const [hoveredEquityDate, setHoveredEquityDate] = React.useState("");
   const [equitySeries, setEquitySeries] = React.useState([]);
   const [portfolioSettings, setPortfolioSettings] = React.useState(null);
   const [isSavingSettings, setIsSavingSettings] = React.useState(false);
@@ -118,11 +135,45 @@ export default function Portfolio() {
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
   const [editTxId, setEditTxId] = React.useState(null);
   const [knownTickers, setKnownTickers] = React.useState([]);
+  const [holdingsSortField, setHoldingsSortField] = React.useState("market_value");
+  const [holdingsSortDirection, setHoldingsSortDirection] = React.useState("desc");
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
   const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
   const trackCashEnabled = (portfolioSettings?.cash_management_mode || "track_cash") === "track_cash";
   const equityPerformanceMode = performanceMode === "growth" ? "net_of_contributions" : "absolute";
+  const latestEquityPoint = equitySeries.length > 0 ? equitySeries[equitySeries.length - 1] : null;
+  const rightSideMetric = performanceMode === "growth"
+    ? fmtPercent(latestEquityPoint?.twr_return_pct)
+    : fmtCurrency(latestEquityPoint?.plotted_value, displayCurrency);
+
+  const sortedHoldingsRows = React.useMemo(() => {
+    const rows = holdingsRows.map((row) => {
+      const basis = Number(row?.total_cost_basis || 0);
+      const realized = Number(row?.realized_gain_value || 0);
+      const realizedPct = basis !== 0 ? (realized / basis) * 100 : null;
+      return { ...row, realized_gain_percent: realizedPct };
+    });
+    const dir = holdingsSortDirection === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      const av = a?.[holdingsSortField];
+      const bv = b?.[holdingsSortField];
+      const an = typeof av === "number" ? av : Number(av);
+      const bn = typeof bv === "number" ? bv : Number(bv);
+      if (!Number.isNaN(an) && !Number.isNaN(bn)) return (an - bn) * dir;
+      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+    });
+    return rows;
+  }, [holdingsRows, holdingsSortDirection, holdingsSortField]);
+
+  const toggleHoldingsSort = (field) => {
+    if (holdingsSortField === field) {
+      setHoldingsSortDirection((p) => (p === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setHoldingsSortField(field);
+    setHoldingsSortDirection("desc");
+  };
 
   const loadPortfolios = React.useCallback(async () => {
     const res = await listPortfolios();
@@ -665,18 +716,21 @@ export default function Portfolio() {
                       onChange={(e) => setEquityRange(e.target.value)}
                       className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
                     >
-                      {["1D", "5D", "1M", "3M", "6M", "1Y", "5Y", "MAX"].map((r) => <option key={r} value={r}>{r}</option>)}
+                      {["1D", "5D", "1W", "1M", "3M", "6M", "1Y", "ALL"].map((r) => <option key={r} value={r}>{r}</option>)}
                     </select>
                   </div>
                 </div>
-                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-slate-100 p-2">
-                  {equitySeries.length > 0 && (
-                    <div className="text-xs text-slate-600 mb-1">
-                      Return: <span className="font-semibold text-sky-700">{fmtPercent(equitySeries[equitySeries.length - 1]?.twr_return_pct)}</span>
-                    </div>
-                  )}
+                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                    <span>{hoveredEquityDate || ""}</span>
+                    <span className="font-semibold text-emerald-700">{rightSideMetric}</span>
+                  </div>
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={equitySeries}>
+                    <AreaChart
+                      data={equitySeries}
+                      onMouseMove={(state) => setHoveredEquityDate(state?.activePayload?.[0]?.payload?.date || "")}
+                      onMouseLeave={() => setHoveredEquityDate("")}
+                    >
                       <defs>
                         <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35} />
@@ -684,20 +738,38 @@ export default function Portfolio() {
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
-                      <XAxis dataKey="date" />
+                      <XAxis dataKey="date" tickFormatter={formatYahooXAxisTick} minTickGap={22} />
                       <YAxis orientation="left" />
                       <Tooltip
                         contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0" }}
-                        formatter={(_, __, item) => {
+                        formatter={(v, __, item) => {
                           const row = item?.payload;
-                          return [fmtPercent(row?.twr_return_pct), "Return"];
+                          return [
+                            performanceMode === "growth"
+                              ? fmtPercent(row?.twr_return_pct)
+                              : fmtCurrency(v, displayCurrency),
+                            performanceMode === "growth" ? "Growth" : "Value",
+                          ];
                         }}
                         labelFormatter={(_, payload) => {
                           const row = payload?.[0]?.payload;
                           return row?.date || "";
                         }}
+                        position={{ x: 12, y: 18 }}
                       />
                       <Area type="monotone" dataKey="plotted_value" stroke="none" fill="url(#equityFill)" />
+                      {latestEquityPoint && (
+                        <ReferenceLine
+                          y={latestEquityPoint.plotted_value}
+                          stroke="#10b981"
+                          strokeDasharray="6 6"
+                          label={{
+                            position: "right",
+                            value: rightSideMetric,
+                            fill: "#065f46",
+                          }}
+                        />
+                      )}
                       <Line type="monotone" dataKey="plotted_value" stroke="#0ea5e9" dot={false} strokeWidth={2.5} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -709,22 +781,25 @@ export default function Portfolio() {
                 <table className="w-full text-sm border-collapse">
                   <thead>
                     <tr className="border-b bg-slate-50">
-                      <th className="text-left py-2">Symbol</th>
-                      <th className="text-left py-2">Shares</th>
-                      <th className="text-left py-2">AC/Share</th>
-                      <th className="text-left py-2">Total Cost ({displayCurrency})</th>
-                      <th className="text-left py-2">Last Price</th>
-                      <th className="text-left py-2">Market Value ({displayCurrency})</th>
-                      <th className="text-left py-2">Day Gain</th>
-                      <th className="text-left py-2">Tot Gain UNRL</th>
-                      <th className="text-left py-2">Realized Gain</th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("ticker")}>Symbol</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("quantity")}>Shares</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("avg_cost_basis")}>AC/Share</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost ({displayCurrency})</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("market_price")}>Last Price</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("market_value")}>Market Value ({displayCurrency})</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("day_change_percent")}>Day Gain (%)</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain ({displayCurrency})</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("unrealized_gain_percent")}>Tot Gain UNRL (%)</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL ({displayCurrency})</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("realized_gain_percent")}>Realized Gain (%)</button></th>
+                      <th className="text-left py-2"><button className="font-medium hover:text-slate-900" onClick={() => toggleHoldingsSort("realized_gain_value")}>Realized Gain ({displayCurrency})</button></th>
                     </tr>
                   </thead>
                   <tbody>
                     {holdingsRows.length === 0 ? (
-                      <tr><td colSpan={9} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                      <tr><td colSpan={12} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
-                      holdingsRows.map((row) => (
+                      sortedHoldingsRows.map((row) => (
                         <tr key={row.ticker} className="border-b hover:bg-slate-50">
                           <td className="py-2 font-mono">{row.ticker}</td>
                           <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
@@ -732,11 +807,20 @@ export default function Portfolio() {
                           <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
+                          <td className={`py-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtPercent(row.day_change_percent)}
+                          </td>
                           <td className={`py-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtCurrency(row.day_change_value, displayCurrency)} ({fmtPercent(row.day_change_percent)})
+                            {fmtCurrency(row.day_change_value, displayCurrency)}
+                          </td>
+                          <td className={`py-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtPercent(row.unrealized_gain_percent)}
                           </td>
                           <td className={`py-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtCurrency(row.unrealized_gain_value, displayCurrency)} ({fmtPercent(row.unrealized_gain_percent)})
+                            {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
+                          </td>
+                          <td className={`py-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
                           </td>
                           <td className={`py-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.realized_gain_value, displayCurrency)}
