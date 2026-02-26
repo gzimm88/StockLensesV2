@@ -1,6 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -108,7 +108,7 @@ export default function Portfolio() {
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
-  const [performanceMode, setPerformanceMode] = React.useState("absolute");
+  const [performanceMode, setPerformanceMode] = React.useState("value");
   const [equitySeries, setEquitySeries] = React.useState([]);
   const [portfolioSettings, setPortfolioSettings] = React.useState(null);
   const [isSavingSettings, setIsSavingSettings] = React.useState(false);
@@ -121,6 +121,8 @@ export default function Portfolio() {
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
   const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
+  const trackCashEnabled = (portfolioSettings?.cash_management_mode || "track_cash") === "track_cash";
+  const equityPerformanceMode = performanceMode === "growth" ? "net_of_contributions" : "absolute";
 
   const loadPortfolios = React.useCallback(async () => {
     const res = await listPortfolios();
@@ -177,7 +179,7 @@ export default function Portfolio() {
         getPortfolioHoldings(portfolioId),
         getPortfolioEquityHistorySeries(portfolioId, {
           range: equityRange,
-          performanceMode,
+          performanceMode: equityPerformanceMode,
           showFxImpact: false,
         }),
         getPortfolioSettings(portfolioId),
@@ -228,7 +230,7 @@ export default function Portfolio() {
 
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions, equityRange, performanceMode]
+    [loadTransactions, equityRange, equityPerformanceMode]
   );
 
   React.useEffect(() => {
@@ -281,7 +283,7 @@ export default function Portfolio() {
       try {
         const history = await getPortfolioEquityHistorySeries(selectedPortfolioId, {
           range: equityRange,
-          performanceMode,
+          performanceMode: equityPerformanceMode,
           showFxImpact: false,
         });
         setEquitySeries(history?.data?.series || []);
@@ -289,7 +291,7 @@ export default function Portfolio() {
         setError(err instanceof Error ? err.message : "Failed to load equity history.");
       }
     })();
-  }, [selectedPortfolioId, equityRange, performanceMode]);
+  }, [selectedPortfolioId, equityRange, equityPerformanceMode]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -642,7 +644,7 @@ export default function Portfolio() {
                 <div><p className="text-slate-500">Market Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.market_move_component, displayCurrency)}</p></div>
                 <div><p className="text-slate-500">FX Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.currency_move_component, displayCurrency)}</p></div>
                 <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtCurrency(dashboardSummary?.realized_gain_value, displayCurrency)}</p></div>
-                <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtCurrency(dashboardSummary?.cash_balance, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">Cash</p><p className="font-medium">{trackCashEnabled ? fmtCurrency(dashboardSummary?.cash_balance, displayCurrency) : "--"}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
               </div>
 
@@ -655,9 +657,8 @@ export default function Portfolio() {
                       onChange={(e) => setPerformanceMode(e.target.value)}
                       className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
                     >
-                      <option value="absolute">Absolute Value</option>
-                      <option value="twr">Time-Weighted Return</option>
-                      <option value="net_of_contributions">Net of Contributions</option>
+                      <option value="value">Holdings Value</option>
+                      <option value="growth">Holdings Growth</option>
                     </select>
                     <select
                       value={equityRange}
@@ -668,12 +669,23 @@ export default function Portfolio() {
                     </select>
                   </div>
                 </div>
-                <div className="h-56">
+                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-slate-100 p-2">
+                  {equitySeries.length > 0 && (
+                    <div className="text-xs text-slate-600 mb-1">
+                      Return: <span className="font-semibold text-sky-700">{fmtPercent(equitySeries[equitySeries.length - 1]?.twr_return_pct)}</span>
+                    </div>
+                  )}
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={equitySeries}>
-                      <CartesianGrid strokeDasharray="3 3" />
+                    <AreaChart data={equitySeries}>
+                      <defs>
+                        <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.05} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
                       <XAxis dataKey="date" />
-                      <YAxis orientation="right" />
+                      <YAxis orientation="left" />
                       <Tooltip
                         contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0" }}
                         formatter={(_, __, item) => {
@@ -685,8 +697,9 @@ export default function Portfolio() {
                           return row?.date || "";
                         }}
                       />
-                      <Line type="monotone" dataKey="plotted_value" stroke="#0f172a" dot={false} strokeWidth={2} />
-                    </LineChart>
+                      <Area type="monotone" dataKey="plotted_value" stroke="none" fill="url(#equityFill)" />
+                      <Line type="monotone" dataKey="plotted_value" stroke="#0ea5e9" dot={false} strokeWidth={2.5} />
+                    </AreaChart>
                   </ResponsiveContainer>
                 </div>
               </div>
@@ -695,39 +708,39 @@ export default function Portfolio() {
                 <h3 className="text-sm font-semibold mb-2">Holdings</h3>
                 <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-2">Ticker</th>
-                      <th className="text-left py-2">Quantity</th>
-                      <th className="text-left py-2">Avg Cost</th>
-                      <th className="text-left py-2">Total Cost Basis</th>
-                      <th className="text-left py-2">Market Price</th>
-                      <th className="text-left py-2">Market Value</th>
-                      <th className="text-left py-2">Day Change</th>
-                      <th className="text-left py-2">Price Return</th>
-                      <th className="text-left py-2">FX Return</th>
-                      <th className="text-left py-2">Combined</th>
-                      <th className="text-left py-2">Unrealized</th>
-                      <th className="text-left py-2">Realized</th>
+                    <tr className="border-b bg-slate-50">
+                      <th className="text-left py-2">Symbol</th>
+                      <th className="text-left py-2">Shares</th>
+                      <th className="text-left py-2">AC/Share</th>
+                      <th className="text-left py-2">Total Cost ({displayCurrency})</th>
+                      <th className="text-left py-2">Last Price</th>
+                      <th className="text-left py-2">Market Value ({displayCurrency})</th>
+                      <th className="text-left py-2">Day Gain</th>
+                      <th className="text-left py-2">Tot Gain UNRL</th>
+                      <th className="text-left py-2">Realized Gain</th>
                     </tr>
                   </thead>
                   <tbody>
                     {holdingsRows.length === 0 ? (
-                      <tr><td colSpan={12} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                      <tr><td colSpan={9} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
                       holdingsRows.map((row) => (
-                        <tr key={row.ticker} className="border-b">
+                        <tr key={row.ticker} className="border-b hover:bg-slate-50">
                           <td className="py-2 font-mono">{row.ticker}</td>
                           <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
                           <td className="py-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.day_change_value, displayCurrency)} ({fmtPercent(row.day_change_percent)})</td>
-                          <td className="py-2">{fmtCurrency(row.price_return_value, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.fx_return_value, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.combined_return_value, displayCurrency)}</td>
-                          <td className="py-2">{fmtCurrency(row.unrealized_gain_value, displayCurrency)} ({fmtPercent(row.unrealized_gain_percent)})</td>
-                          <td className="py-2">{fmtCurrency(row.realized_gain_value, displayCurrency)}</td>
+                          <td className={`py-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.day_change_value, displayCurrency)} ({fmtPercent(row.day_change_percent)})
+                          </td>
+                          <td className={`py-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.unrealized_gain_value, displayCurrency)} ({fmtPercent(row.unrealized_gain_percent)})
+                          </td>
+                          <td className={`py-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.realized_gain_value, displayCurrency)}
+                          </td>
                         </tr>
                       ))
                     )}
