@@ -55,7 +55,7 @@ _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
 _LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER_CHANGE", "MERGE"}
 _DECIMAL_MONEY_SCALE = Decimal("0.0000000001")
 _DECIMAL_RATE_SCALE = Decimal("0.000000000001")
-_EQUITY_ENGINE_VERSION = "phase9-v1"
+_EQUITY_ENGINE_VERSION = "phase11-v1"
 
 
 @dataclass(frozen=True)
@@ -2231,6 +2231,9 @@ def _load_portfolio_settings(db: Session, portfolio_id: str) -> dict[str, object
             "stale_trading_days": None,
             "calendar_policy": "union_required_all_inputs",
             "default_history_range": "6M",
+            "cash_management_mode": "track_cash",
+            "include_dividends_in_performance": True,
+            "reinvest_dividends_overlay": False,
             "version": 1,
         }
     return {
@@ -2238,21 +2241,110 @@ def _load_portfolio_settings(db: Session, portfolio_id: str) -> dict[str, object
         "stale_trading_days": int(row.stale_trading_days) if row.stale_trading_days is not None else None,
         "calendar_policy": row.calendar_policy or "union_required_all_inputs",
         "default_history_range": row.default_history_range or "6M",
+        "cash_management_mode": (row.cash_management_mode or "track_cash").strip().lower(),
+        "include_dividends_in_performance": bool(row.include_dividends_in_performance),
+        "reinvest_dividends_overlay": bool(row.reinvest_dividends_overlay),
         "version": int(row.version or 1),
     }
+
+
+def get_portfolio_settings(db: Session, portfolio_id: str) -> dict[str, object]:
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    settings = _load_portfolio_settings(db, portfolio_id)
+    return {
+        "portfolio_id": portfolio_id,
+        "base_currency": (portfolio.base_currency or "USD").strip().upper() or "USD",
+        "strict_mode": bool(settings["strict_mode"]),
+        "stale_trading_days": settings["stale_trading_days"],
+        "calendar_policy": str(settings["calendar_policy"]),
+        "default_history_range": str(settings["default_history_range"]),
+        "cash_management_mode": str(settings["cash_management_mode"]),
+        "include_dividends_in_performance": bool(settings["include_dividends_in_performance"]),
+        "reinvest_dividends_overlay": bool(settings["reinvest_dividends_overlay"]),
+        "version": int(settings["version"]),
+    }
+
+
+def update_portfolio_settings(
+    db: Session,
+    portfolio_id: str,
+    *,
+    cash_management_mode: str | None = None,
+    include_dividends_in_performance: bool | None = None,
+    reinvest_dividends_overlay: bool | None = None,
+) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    current_row = (
+        db.query(PortfolioSettings)
+        .filter(
+            PortfolioSettings.portfolio_id == portfolio_id,
+            PortfolioSettings.is_deleted == False,
+            PortfolioSettings.deleted_at.is_(None),
+        )
+        .order_by(PortfolioSettings.version.desc(), PortfolioSettings.updated_at.desc(), PortfolioSettings.created_at.desc())
+        .first()
+    )
+    current = _load_portfolio_settings(db, portfolio_id)
+    next_mode = str(cash_management_mode or current["cash_management_mode"]).strip().lower()
+    if next_mode not in {"track_cash", "ignore_cash"}:
+        raise PortfolioEngineError("cash_management_mode must be 'track_cash' or 'ignore_cash'.")
+
+    next_include_div = (
+        bool(include_dividends_in_performance)
+        if include_dividends_in_performance is not None
+        else bool(current["include_dividends_in_performance"])
+    )
+    next_reinvest = (
+        bool(reinvest_dividends_overlay)
+        if reinvest_dividends_overlay is not None
+        else bool(current["reinvest_dividends_overlay"])
+    )
+
+    now = datetime.utcnow()
+    if current_row is not None:
+        current_row.is_deleted = True
+        current_row.deleted_at = now
+        current_row.updated_at = now
+        next_version = int(current_row.version or 1) + 1
+    else:
+        next_version = int(current["version"]) + 1
+
+    row = PortfolioSettings(
+        id=str(uuid.uuid4()),
+        portfolio_id=portfolio_id,
+        strict_mode=bool(current["strict_mode"]),
+        stale_trading_days=current["stale_trading_days"],
+        calendar_policy=str(current["calendar_policy"]),
+        default_history_range=str(current["default_history_range"]),
+        cash_management_mode=next_mode,
+        include_dividends_in_performance=next_include_div,
+        reinvest_dividends_overlay=next_reinvest,
+        version=next_version,
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+        is_deleted=False,
+    )
+    db.add(row)
+    db.commit()
+    return get_portfolio_settings(db, portfolio_id)
 
 
 def _range_start_from_label(end_date: date, range_label: str) -> date | None:
     label = (range_label or "6M").strip().upper()
     if label in {"ALL", "MAX"}:
         return None
+    if label == "1D":
+        return end_date - timedelta(days=1)
+    if label == "5D":
+        return end_date - timedelta(days=5)
     if label == "1W":
         return end_date - timedelta(days=7)
     if label.endswith("M") and label[:-1].isdigit():
         return end_date - timedelta(days=30 * int(label[:-1]))
     if label.endswith("Y") and label[:-1].isdigit():
         return end_date - timedelta(days=365 * int(label[:-1]))
-    raise PortfolioEngineError(f"Unsupported range '{range_label}'. Use 1W, 1M, 3M, 6M, 1Y, 5Y, or ALL.")
+    raise PortfolioEngineError(f"Unsupported range '{range_label}'. Use 1D, 5D, 1W, 1M, 3M, 6M, 1Y, 5Y, or ALL.")
 
 
 def _sorted_active_transactions_for_window(
@@ -2509,15 +2601,66 @@ def rebuild_equity_history(
     if mode_norm not in {"incremental", "full"}:
         raise PortfolioEngineError("mode must be 'incremental' or 'full'.")
     strict_mode = bool(settings["strict_mode"]) if strict is None else bool(strict)
+    cash_mode = str(settings.get("cash_management_mode") or "track_cash").strip().lower()
+    include_dividends_in_perf = bool(settings.get("include_dividends_in_performance", True))
     to_d = to_date or date.today()
 
     transactions_all = _sorted_active_transactions_for_window(db, portfolio_id)
-    if not transactions_all:
-        raise PortfolioEngineError(f"No transactions found for portfolio '{portfolio.name}'.")
     actions_all = _sorted_active_actions_for_window(db, portfolio_id)
+    latest_build = _latest_completed_equity_build(db, portfolio_id)
+    if not transactions_all:
+        build_version = int(latest_build.build_version if latest_build else 0) + 1
+        now = datetime.utcnow()
+        empty_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "engine_version": _EQUITY_ENGINE_VERSION,
+                    "portfolio_id": portfolio_id,
+                    "settings": settings,
+                    "mode": mode,
+                    "force": bool(force),
+                    "strict": bool(strict_mode),
+                    "no_transactions": True,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        build = PortfolioEquityHistoryBuild(
+            id=str(uuid.uuid4()),
+            portfolio_id=portfolio_id,
+            build_version=build_version,
+            mode=(mode or "incremental").strip().lower(),
+            from_date=from_date or to_d,
+            to_date=to_d,
+            strict=bool(strict_mode),
+            source_hash=empty_hash,
+            engine_version=_EQUITY_ENGINE_VERSION,
+            status="completed",
+            started_at=now,
+            finished_at=now,
+            rows_written=0,
+            forced=bool(force),
+        )
+        db.add(build)
+        db.commit()
+        return {
+            "portfolio_id": portfolio_id,
+            "build_id": build.id,
+            "build_version": build.build_version,
+            "mode": build.mode,
+            "strict": bool(build.strict),
+            "forced": bool(build.forced),
+            "rows_written": 0,
+            "from_date": build.from_date.isoformat() if build.from_date else None,
+            "to_date": build.to_date.isoformat() if build.to_date else None,
+            "status": build.status,
+            "source_hash": build.source_hash,
+            "engine_version": build.engine_version,
+        }
 
     first_tx_date = min(r.trade_date for r in transactions_all)
-    latest_build = _latest_completed_equity_build(db, portfolio_id)
     if mode_norm == "full":
         start_date = from_date or first_tx_date
     else:
@@ -2654,6 +2797,8 @@ def rebuild_equity_history(
     cash = Decimal("0")
     realized_total = Decimal("0")
     prev_included_total_equity: Decimal | None = None
+    prev_included_components: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
+    prev_twr_index = Decimal("1").quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
     rows_to_add: list[PortfolioEquityHistoryRow] = []
 
     try:
@@ -2662,16 +2807,21 @@ def rebuild_equity_history(
                 continue
 
             day_dividend_cash = Decimal("0")
+            day_net_contribution = Decimal("0")
             for tx in tx_by_date.get(d, []):
                 ticker = tx.ticker_symbol_normalized
                 shares = _to_decimal(tx.shares)
                 gross_base = _tx_base_amount(tx)
                 if tx.tx_type == "Buy":
                     cash -= gross_base
+                    if cash_mode == "ignore_cash":
+                        day_net_contribution += gross_base
                     if shares > Decimal("0"):
                         lots[ticker].append((shares, (gross_base / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)))
                 elif tx.tx_type == "Sell":
                     cash += gross_base
+                    if cash_mode == "ignore_cash":
+                        day_net_contribution -= gross_base
                     remaining = shares
                     consumed_cost = Decimal("0")
                     while remaining > Decimal("0"):
@@ -2689,6 +2839,8 @@ def rebuild_equity_history(
                 elif tx.tx_type == "Dividend":
                     cash += gross_base
                     day_dividend_cash += gross_base
+                    if not include_dividends_in_perf:
+                        day_net_contribution += gross_base
 
             for action in action_by_date.get(d, []):
                 ticker = action.ticker
@@ -2716,6 +2868,8 @@ def rebuild_equity_history(
                     amount = _to_decimal(action.cash_amount)
                     cash += amount
                     day_dividend_cash += amount
+                    if not include_dividends_in_perf:
+                        day_net_contribution += amount
 
             if d < start_date:
                 continue
@@ -2724,6 +2878,7 @@ def rebuild_equity_history(
             missing_reasons: list[str] = []
             market_value = Decimal("0")
             cost_basis_total = Decimal("0")
+            fx_day_component = Decimal("0")
             row_components: list[dict[str, object]] = []
             for ticker in required_tickers:
                 qty = sum((ls for ls, _ in lots[ticker]), Decimal("0")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
@@ -2743,6 +2898,14 @@ def rebuild_equity_history(
                         continue
                 value = (qty * px * fx).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                 market_value += value
+                prev_comp = prev_included_components.get(ticker)
+                if prev_comp is not None:
+                    prev_qty, prev_px, prev_fx = prev_comp
+                    overlap_qty = prev_qty if prev_qty <= qty else qty
+                    if overlap_qty > Decimal("0"):
+                        fx_day_component += (overlap_qty * px * (fx - prev_fx)).quantize(
+                            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                        )
                 row_components.append(
                     {
                         "ticker": ticker,
@@ -2760,10 +2923,14 @@ def rebuild_equity_history(
                     )
                 continue
 
-            total_equity = (cash + market_value).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            total_equity = (
+                (cash + market_value) if cash_mode == "track_cash" else market_value
+            ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             unrealized = (market_value - cost_basis_total).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             day_change_value = Decimal("0")
             day_change_pct = Decimal("0")
+            market_return_component = Decimal("0")
+            twr_index = prev_twr_index
             if prev_included_total_equity is not None:
                 day_change_value = (total_equity - prev_included_total_equity).quantize(
                     _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
@@ -2772,7 +2939,25 @@ def rebuild_equity_history(
                     day_change_pct = ((day_change_value / prev_included_total_equity) * Decimal("100")).quantize(
                         _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
                     )
+                    twr_period = ((day_change_value - day_net_contribution) / prev_included_total_equity).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                    twr_index = (prev_twr_index * (Decimal("1") + twr_period)).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                market_return_component = (day_change_value - day_net_contribution - fx_day_component).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
             prev_included_total_equity = total_equity
+            prev_twr_index = twr_index
+            prev_included_components = {
+                c["ticker"]: (
+                    _to_decimal(c["qty"]),
+                    _to_decimal(c["price"]),
+                    _to_decimal(c["fx"], scale=_DECIMAL_RATE_SCALE),
+                )
+                for c in row_components
+            }
 
             row_payload = {
                 "engine_version": _EQUITY_ENGINE_VERSION,
@@ -2784,6 +2969,10 @@ def rebuild_equity_history(
                 "cost_basis_total": float(cost_basis_total),
                 "realized_gain_value": float(realized_total),
                 "dividend_cash_value": float(day_dividend_cash),
+                "net_contribution": float(day_net_contribution),
+                "market_return_component": float(market_return_component),
+                "fx_return_component": float(fx_day_component),
+                "twr_index": float(twr_index),
                 "components": row_components,
             }
             input_hash = hashlib.sha256(
@@ -2804,6 +2993,10 @@ def rebuild_equity_history(
                     dividend_cash_value=float(day_dividend_cash),
                     day_change_value=float(day_change_value),
                     day_change_percent=float(day_change_pct),
+                    net_contribution=float(day_net_contribution),
+                    market_return_component=float(market_return_component),
+                    fx_return_component=float(fx_day_component),
+                    twr_index=float(twr_index),
                     input_hash=input_hash,
                     created_at=datetime.utcnow(),
                 )
@@ -2845,27 +3038,82 @@ def get_portfolio_equity_history(
     *,
     range_label: str = "6M",
     build_version: int | None = None,
+    performance_mode: str = "absolute",
+    show_fx_impact: bool = False,
 ) -> dict[str, object]:
     get_portfolio_or_error(db, portfolio_id)
+    perf_mode = (performance_mode or "absolute").strip().lower()
+    if perf_mode not in {"absolute", "twr", "net_of_contributions"}:
+        raise PortfolioEngineError("performance_mode must be one of: absolute, twr, net_of_contributions.")
     rows = _resolve_latest_equity_rows(db, portfolio_id, build_version=build_version)
     if not rows:
         _range_start_from_label(date.today(), range_label)
-        return {"portfolio_id": portfolio_id, "range": (range_label or "6M").upper(), "series": []}
+        return {
+            "portfolio_id": portfolio_id,
+            "range": (range_label or "6M").upper(),
+            "performance_mode": perf_mode,
+            "show_fx_impact": bool(show_fx_impact),
+            "series": [],
+        }
 
     start_date = _range_start_from_label(rows[-1].date, range_label)
     filtered = rows if start_date is None else [r for r in rows if r.date >= start_date]
+    baseline = filtered[0] if filtered else None
+    baseline_twr = Decimal(str(float(baseline.twr_index))) if baseline is not None else Decimal("1")
+    cumulative_contrib = Decimal("0")
+    cumulative_fx = Decimal("0")
+    cumulative_market = Decimal("0")
     series = [
-        {
-            "date": r.date.isoformat(),
-            "total_equity": float(r.total_equity),
-            "day_change_value": float(r.day_change_value),
-            "day_change_percent": float(r.day_change_percent),
-        }
-        for r in filtered
+        None
+        for _ in filtered
     ]
+    for idx, r in enumerate(filtered):
+        total_equity = Decimal(str(float(r.total_equity)))
+        net_contribution = Decimal(str(float(r.net_contribution or 0.0)))
+        day_change = Decimal(str(float(r.day_change_value)))
+        twr_index = Decimal(str(float(r.twr_index or 1.0)))
+        fx_component = Decimal(str(float(r.fx_return_component or 0.0)))
+        market_component = Decimal(str(float(r.market_return_component or 0.0)))
+        cumulative_contrib += net_contribution
+        cumulative_fx += fx_component
+        cumulative_market += market_component
+
+        net_of_contrib_value = (total_equity - cumulative_contrib).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        twr_return_pct = Decimal("0")
+        if baseline_twr != Decimal("0"):
+            twr_return_pct = (((twr_index / baseline_twr) - Decimal("1")) * Decimal("100")).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+
+        plotted = total_equity
+        if perf_mode == "twr":
+            plotted = twr_return_pct
+        elif perf_mode == "net_of_contributions":
+            plotted = net_of_contrib_value
+        if show_fx_impact:
+            plotted = (plotted + cumulative_fx).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+        series[idx] = {
+            "date": r.date.isoformat(),
+            "total_equity": float(total_equity),
+            "day_change_value": float(day_change),
+            "day_change_percent": float(r.day_change_percent),
+            "net_contribution": float(net_contribution),
+            "cumulative_net_contribution": float(cumulative_contrib),
+            "market_return_component": float(market_component),
+            "fx_return_component": float(fx_component),
+            "cumulative_market_return_component": float(cumulative_market),
+            "cumulative_fx_return_component": float(cumulative_fx),
+            "twr_index": float(twr_index),
+            "twr_return_pct": float(twr_return_pct),
+            "net_of_contributions_value": float(net_of_contrib_value),
+            "plotted_value": float(plotted),
+        }
     return {
         "portfolio_id": portfolio_id,
         "range": (range_label or "6M").upper(),
+        "performance_mode": perf_mode,
+        "show_fx_impact": bool(show_fx_impact),
         "series": series,
     }
 
@@ -2875,6 +3123,8 @@ def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str,
     row = _latest_equity_row_or_none(db, portfolio_id)
     if row is None:
         raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
+    market_move_component = Decimal(str(float(row.market_return_component or 0.0)))
+    currency_move_component = Decimal(str(float(row.fx_return_component or 0.0)))
     return {
         "portfolio_id": portfolio_id,
         "as_of": row.date.isoformat(),
@@ -2894,6 +3144,8 @@ def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str,
         ),
         "realized_gain_value": float(row.realized_gain_value),
         "dividend_cash_value": float(row.dividend_cash_value),
+        "market_move_component": float(market_move_component),
+        "currency_move_component": float(currency_move_component),
     }
 
 
@@ -2930,6 +3182,8 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
         market_value = (qty * px_today * fx_today).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
 
         prev_value = None
+        px_prev = None
+        fx_prev = None
         if prev_date is not None:
             px_prev_row = (
                 db.query(PricesHistory)
@@ -2942,10 +3196,19 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
                 prev_value = (qty * px_prev * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
         day_change = Decimal("0")
         day_change_pct = Decimal("0")
+        price_return_value = Decimal("0")
+        fx_return_value = Decimal("0")
         if prev_value is not None:
             day_change = (market_value - prev_value).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             if prev_value != Decimal("0"):
                 day_change_pct = ((day_change / prev_value) * Decimal("100")).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+            if px_prev is not None and fx_prev is not None:
+                price_return_value = (qty * (px_today - px_prev) * fx_prev).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+                fx_return_value = (qty * px_today * (fx_today - fx_prev)).quantize(
                     _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
                 )
         total_cost = state[ticker]["total_cost_basis"]
@@ -2953,6 +3216,9 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
         unrealized_pct = Decimal("0")
         if total_cost != Decimal("0"):
             unrealized_pct = ((unrealized / total_cost) * Decimal("100")).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        combined_return_value = (price_return_value + fx_return_value).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
         rows.append(
             {
                 "ticker": ticker,
@@ -2963,6 +3229,9 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
                 "market_value": float(market_value),
                 "day_change_value": float(day_change),
                 "day_change_percent": float(day_change_pct),
+                "price_return_value": float(price_return_value),
+                "fx_return_value": float(fx_return_value),
+                "combined_return_value": float(combined_return_value),
                 "unrealized_gain_value": float(unrealized),
                 "unrealized_gain_percent": float(unrealized_pct),
                 "realized_gain_value": float(state[ticker]["realized_gain_value"]),

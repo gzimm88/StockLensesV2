@@ -49,6 +49,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     get_portfolio_dashboard_summary,
     get_portfolio_equity_history,
     get_portfolio_holdings,
+    get_portfolio_settings,
     get_latest_valuation_attribution,
     get_latest_valuation_diff,
     get_or_create_default_portfolio,
@@ -65,6 +66,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     soft_delete_portfolio,
     soft_delete_transaction,
     update_corporate_action,
+    update_portfolio_settings,
     update_transaction,
 )
 from backend.repositories import financials_repo, metrics_repo, prices_repo
@@ -200,6 +202,67 @@ def _ensure_phase9_schema() -> None:
 _ensure_phase9_schema()
 
 
+def _ensure_phase11_schema() -> None:
+    with engine.begin() as conn:
+        settings_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_settings)"))}
+        if settings_cols:
+            if "cash_management_mode" not in settings_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_settings "
+                        "ADD COLUMN cash_management_mode VARCHAR NOT NULL DEFAULT 'track_cash'"
+                    )
+                )
+            if "include_dividends_in_performance" not in settings_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_settings "
+                        "ADD COLUMN include_dividends_in_performance BOOLEAN NOT NULL DEFAULT 1"
+                    )
+                )
+            if "reinvest_dividends_overlay" not in settings_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_settings "
+                        "ADD COLUMN reinvest_dividends_overlay BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+
+        row_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_equity_history_rows)"))}
+        if row_cols:
+            if "net_contribution" not in row_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_equity_history_rows "
+                        "ADD COLUMN net_contribution NUMERIC(24,10) NOT NULL DEFAULT 0"
+                    )
+                )
+            if "market_return_component" not in row_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_equity_history_rows "
+                        "ADD COLUMN market_return_component NUMERIC(24,10) NOT NULL DEFAULT 0"
+                    )
+                )
+            if "fx_return_component" not in row_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_equity_history_rows "
+                        "ADD COLUMN fx_return_component NUMERIC(24,10) NOT NULL DEFAULT 0"
+                    )
+                )
+            if "twr_index" not in row_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE portfolio_equity_history_rows "
+                        "ADD COLUMN twr_index NUMERIC(24,10) NOT NULL DEFAULT 1"
+                    )
+                )
+
+
+_ensure_phase11_schema()
+
+
 def _bootstrap_default_portfolio() -> None:
     db = SessionLocal()
     try:
@@ -311,6 +374,12 @@ class CorporateActionUpdateRequest(BaseModel):
     factor: float | None = None
     cash_amount: float | None = None
     metadata: dict[str, Any] | None = None
+
+
+class PortfolioSettingsUpdateRequest(BaseModel):
+    cash_management_mode: str | None = None
+    include_dividends_in_performance: bool | None = None
+    reinvest_dividends_overlay: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +495,22 @@ def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(ge
             trade_date=payload.date,
             currency=payload.currency,
         )
+        try:
+            rebuild_equity_history(
+                db,
+                payload.portfolio_id,
+                mode="incremental",
+                force=False,
+                strict=None,
+            )
+        except PortfolioEngineError:
+            rebuild_equity_history(
+                db,
+                payload.portfolio_id,
+                mode="full",
+                force=True,
+                strict=None,
+            )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return PortfolioProcessResponse(ok=True, message="Transaction created", data=data)
@@ -444,6 +529,22 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
             trade_date=payload.date,
             currency=payload.currency,
         )
+        try:
+            rebuild_equity_history(
+                db,
+                data["portfolio_id"],
+                mode="incremental",
+                force=False,
+                strict=None,
+            )
+        except PortfolioEngineError:
+            rebuild_equity_history(
+                db,
+                data["portfolio_id"],
+                mode="full",
+                force=True,
+                strict=None,
+            )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return PortfolioProcessResponse(ok=True, message="Transaction updated", data=data)
@@ -453,6 +554,22 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
 def delete_transaction(transaction_id: str, db: Session = Depends(get_db)):
     try:
         data = soft_delete_transaction(db, transaction_id)
+        try:
+            rebuild_equity_history(
+                db,
+                data["portfolio_id"],
+                mode="incremental",
+                force=False,
+                strict=None,
+            )
+        except PortfolioEngineError:
+            rebuild_equity_history(
+                db,
+                data["portfolio_id"],
+                mode="full",
+                force=True,
+                strict=None,
+            )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return PortfolioProcessResponse(ok=True, message="Transaction soft-deleted", data=data)
@@ -609,10 +726,19 @@ def get_portfolio_equity_history_route(
     portfolio_id: str,
     range: str = Query(default="6M"),
     build_version: int | None = Query(default=None),
+    performance_mode: str = Query(default="absolute"),
+    show_fx_impact: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     try:
-        data = get_portfolio_equity_history(db, portfolio_id, range_label=range, build_version=build_version)
+        data = get_portfolio_equity_history(
+            db,
+            portfolio_id,
+            range_label=range,
+            build_version=build_version,
+            performance_mode=performance_mode,
+            show_fx_impact=show_fx_impact,
+        )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return PortfolioProcessResponse(
@@ -647,6 +773,42 @@ def post_rebuild_equity_history_for_portfolio(
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio equity history rebuilt",
+        data=data,
+    )
+
+
+@app.get("/portfolios/{portfolio_id}/settings", response_model=PortfolioProcessResponse)
+def get_portfolio_settings_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = get_portfolio_settings(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio settings loaded",
+        data=data,
+    )
+
+
+@app.put("/portfolios/{portfolio_id}/settings", response_model=PortfolioProcessResponse)
+def update_portfolio_settings_route(
+    portfolio_id: str,
+    payload: PortfolioSettingsUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        data = update_portfolio_settings(
+            db,
+            portfolio_id,
+            cash_management_mode=payload.cash_management_mode,
+            include_dividends_in_performance=payload.include_dividends_in_performance,
+            reinvest_dividends_overlay=payload.reinvest_dividends_overlay,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio settings updated",
         data=data,
     )
 
