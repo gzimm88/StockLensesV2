@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
 from backend.main import app
-from backend.models import PortfolioTransaction
+from backend.models import PortfolioEquityHistoryBuild, PortfolioTransaction, PricesHistory
 from backend.orchestrator.portfolio_orchestrator import create_portfolio
 
 
@@ -40,6 +40,25 @@ def _create_portfolio_id(SessionLocal: sessionmaker, name: str = "Phase2_Test") 
         return str(row["id"])
     finally:
         db.close()
+
+
+def _seed_price(db: Session, ticker: str, d: date, close: float) -> None:
+    db.add(
+        PricesHistory(
+            id=f"{ticker}-{d.isoformat()}",
+            ticker=ticker,
+            date=d,
+            close=close,
+            close_adj=close,
+            open=close,
+            high=close,
+            low=close,
+            volume=100,
+            source="seed",
+            as_of_date=d,
+        )
+    )
+    db.commit()
 
 
 def test_transaction_crud_soft_delete_and_list():
@@ -188,6 +207,74 @@ def test_update_creates_new_version_and_soft_deletes_old():
     app.dependency_overrides.clear()
 
 
+def test_edit_transaction_triggers_equity_history_rebuild():
+    client, SessionLocal = _build_client()
+    portfolio_id = _create_portfolio_id(SessionLocal, name="Phase11_Rebuild")
+    d0 = date(2026, 2, 1)
+    d1 = date(2026, 2, 2)
+    db: Session = SessionLocal()
+    try:
+        _seed_price(db, "AAPL", d0, 100.0)
+        _seed_price(db, "AAPL", d1, 110.0)
+    finally:
+        db.close()
+
+    created = client.post(
+        "/transactions",
+        json={
+            "portfolio_id": portfolio_id,
+            "ticker": "AAPL",
+            "type": "BUY",
+            "quantity": 10,
+            "price": 100,
+            "date": "2026-02-01",
+            "currency": "USD",
+        },
+    )
+    assert created.status_code == 200
+    tx_id = created.json()["data"]["id"]
+
+    db = SessionLocal()
+    try:
+        builds_after_create = (
+            db.query(PortfolioEquityHistoryBuild)
+            .filter(PortfolioEquityHistoryBuild.portfolio_id == portfolio_id)
+            .order_by(PortfolioEquityHistoryBuild.build_version.asc())
+            .all()
+        )
+        assert len(builds_after_create) == 1
+        first_version = builds_after_create[0].build_version
+    finally:
+        db.close()
+
+    updated = client.put(
+        f"/transactions/{tx_id}",
+        json={
+            "ticker": "AAPL",
+            "type": "BUY",
+            "quantity": 8,
+            "price": 100,
+            "date": "2026-02-01",
+            "currency": "USD",
+        },
+    )
+    assert updated.status_code == 200
+
+    db = SessionLocal()
+    try:
+        builds_after_update = (
+            db.query(PortfolioEquityHistoryBuild)
+            .filter(PortfolioEquityHistoryBuild.portfolio_id == portfolio_id)
+            .order_by(PortfolioEquityHistoryBuild.build_version.asc())
+            .all()
+        )
+        assert len(builds_after_update) >= 2
+        assert builds_after_update[-1].build_version > first_version
+    finally:
+        db.close()
+    app.dependency_overrides.clear()
+
+
 def test_reprocess_determinism_for_same_transactions(monkeypatch):
     client, SessionLocal = _build_client()
     portfolio_id = _create_portfolio_id(SessionLocal, name="Phase2_Reprocess")
@@ -208,7 +295,7 @@ def test_reprocess_determinism_for_same_transactions(monkeypatch):
 
     counter = {"n": 0}
 
-    async def _fake_run(db, portfolio_id: str):
+    async def _fake_run(db, portfolio_id: str, strict: bool = False):
         counter["n"] += 1
         return {
             "run_id": f"run-{counter['n']}",
