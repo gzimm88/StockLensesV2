@@ -126,21 +126,22 @@ function scoreCapitalAllocation(m) {
 //   NEW: w-avg(8, 8, 5.65, 7) = 7.50  ← appropriate for 16% EPS CAGR at scale
 function scoreGrowth(m) {
     const eps5yRaw = toPoints(m.eps_cagr_5y_pct);
-
     const rev5yRaw = toPoints(m.revenue_cagr_5y_pct ?? m.rev_cagr_5y_pct);
     const eps3yRaw = toPoints(m.eps_cagr_3y_pct);
     const rev3yRaw = toPoints(m.revenue_cagr_3y_pct ?? m.rev_cagr_3y_pct);
+    const epsBaseRaw = eps5yRaw != null ? eps5yRaw : eps3yRaw;
+    const revBaseRaw = rev5yRaw != null ? rev5yRaw : rev3yRaw;
 
     // EPS CAGR 5Y — lookup table (max at ≥25%)
-    const sub_eps5 = eps5yRaw == null ? null :
-        eps5yRaw >= 25 ? 10 : eps5yRaw >= 20 ? 9 : eps5yRaw >= 15 ? 8 :
-        eps5yRaw >= 12 ? 7 : eps5yRaw >= 10 ? 6 : eps5yRaw >= 7  ? 5 :
-        eps5yRaw >= 0  ? 3 : 1;
+    const sub_eps5 = epsBaseRaw == null ? null :
+        epsBaseRaw >= 25 ? 10 : epsBaseRaw >= 20 ? 9 : epsBaseRaw >= 15 ? 8 :
+        epsBaseRaw >= 12 ? 7 : epsBaseRaw >= 10 ? 6 : epsBaseRaw >= 7  ? 5 :
+        epsBaseRaw >= 0  ? 3 : 1;
 
     // Revenue CAGR 5Y — lookup table
-    const sub_rev5 = rev5yRaw == null ? null :
-        rev5yRaw >= 20 ? 10 : rev5yRaw >= 15 ? 9 : rev5yRaw >= 12 ? 8 :
-        rev5yRaw >= 8  ? 7 : rev5yRaw >= 5  ? 6 : rev5yRaw >= 0  ? 3 : 1;
+    const sub_rev5 = revBaseRaw == null ? null :
+        revBaseRaw >= 20 ? 10 : revBaseRaw >= 15 ? 9 : revBaseRaw >= 12 ? 8 :
+        revBaseRaw >= 8  ? 7 : revBaseRaw >= 5  ? 6 : revBaseRaw >= 0  ? 3 : 1;
 
     // Acceleration: 3Y vs 5Y trend
     // Centered at 7 so mild deceleration from a high base costs only a small penalty.
