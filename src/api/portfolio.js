@@ -45,6 +45,20 @@ export function processPortfolio(portfolioId, { strict = false } = {}) {
   return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/process${qs}`, { method: "POST" });
 }
 
+export function rebuildPortfolioEquityHistory(
+  portfolioId,
+  { mode = "incremental", force = false, strict = false } = {}
+) {
+  const qs = new URLSearchParams({
+    mode,
+    force: force ? "true" : "false",
+    strict: strict ? "true" : "false",
+  });
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/rebuild-equity-history?${qs.toString()}`, {
+    method: "POST",
+  });
+}
+
 export async function getLastPortfolioRun(portfolioId) {
   try {
     return await apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/last`, { method: "GET" });

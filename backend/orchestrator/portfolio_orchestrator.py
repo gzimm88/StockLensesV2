@@ -2964,7 +2964,7 @@ def rebuild_equity_history(
                 "portfolio_id": portfolio_id,
                 "build_version": build_version,
                 "date": d.isoformat(),
-                "cash_balance": float(cash),
+                "cash_balance": float(cash if cash_mode == "track_cash" else Decimal("0")),
                 "market_value_total": float(market_value),
                 "cost_basis_total": float(cost_basis_total),
                 "realized_gain_value": float(realized_total),
@@ -2985,7 +2985,7 @@ def rebuild_equity_history(
                     build_version=build_version,
                     date=d,
                     total_equity=float(total_equity),
-                    cash_balance=float(cash),
+                    cash_balance=float(cash if cash_mode == "track_cash" else Decimal("0")),
                     market_value_total=float(market_value),
                     cost_basis_total=float(cost_basis_total),
                     unrealized_gain_value=float(unrealized),
@@ -3475,13 +3475,24 @@ async def run_portfolio_creation_flow(db: Session, portfolio_id: str, strict: bo
         latest_eq_build = _latest_completed_equity_build(db, portfolio_id)
         eq_mode = "incremental" if latest_eq_build else "full"
         eq_force = False if latest_eq_build else True
-        eq_build = rebuild_equity_history(
-            db,
-            portfolio_id,
-            mode=eq_mode,
-            force=eq_force,
-            strict=bool(strict),
-        )
+        try:
+            eq_build = rebuild_equity_history(
+                db,
+                portfolio_id,
+                mode=eq_mode,
+                force=eq_force,
+                strict=bool(strict),
+            )
+        except PortfolioEngineError:
+            # Settings or historical input changes can invalidate incremental mode.
+            # Force a deterministic full rebuild in the same processing flow.
+            eq_build = rebuild_equity_history(
+                db,
+                portfolio_id,
+                mode="full",
+                force=True,
+                strict=bool(strict),
+            )
         payload["equity_history_build"] = eq_build
 
         cache_path = _run_cache_path(portfolio_id)

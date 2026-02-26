@@ -1,7 +1,16 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { createPageUrl } from "@/utils";
 import { Ticker } from "@/api/entities";
 import {
@@ -20,6 +29,7 @@ import {
   listPortfolioTransactions,
   listPortfolios,
   processPortfolio,
+  rebuildPortfolioEquityHistory,
   updatePortfolioSettings,
   updatePortfolioTransaction,
 } from "@/api/portfolio";
@@ -48,6 +58,17 @@ function shortHash(hash) {
 function fmtNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function fmtCurrency(value, currency = "USD") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return Number(value).toLocaleString("en-US", {
+    style: "currency",
+    currency,
+    currencySign: "accounting",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function fmtPercent(value, digits = 2) {
@@ -88,10 +109,10 @@ export default function Portfolio() {
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
   const [performanceMode, setPerformanceMode] = React.useState("absolute");
-  const [showFxImpact, setShowFxImpact] = React.useState(false);
   const [equitySeries, setEquitySeries] = React.useState([]);
   const [portfolioSettings, setPortfolioSettings] = React.useState(null);
   const [isSavingSettings, setIsSavingSettings] = React.useState(false);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
@@ -99,6 +120,7 @@ export default function Portfolio() {
   const [knownTickers, setKnownTickers] = React.useState([]);
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
+  const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
 
   const loadPortfolios = React.useCallback(async () => {
     const res = await listPortfolios();
@@ -156,7 +178,7 @@ export default function Portfolio() {
         getPortfolioEquityHistorySeries(portfolioId, {
           range: equityRange,
           performanceMode,
-          showFxImpact,
+          showFxImpact: false,
         }),
         getPortfolioSettings(portfolioId),
       ]);
@@ -206,7 +228,7 @@ export default function Portfolio() {
 
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions, equityRange, performanceMode, showFxImpact]
+    [loadTransactions, equityRange, performanceMode]
   );
 
   React.useEffect(() => {
@@ -260,14 +282,14 @@ export default function Portfolio() {
         const history = await getPortfolioEquityHistorySeries(selectedPortfolioId, {
           range: equityRange,
           performanceMode,
-          showFxImpact,
+          showFxImpact: false,
         });
         setEquitySeries(history?.data?.series || []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load equity history.");
       }
     })();
-  }, [selectedPortfolioId, equityRange, performanceMode, showFxImpact]);
+  }, [selectedPortfolioId, equityRange, performanceMode]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -317,7 +339,24 @@ export default function Portfolio() {
       setTxDirty(false);
       await loadPortfolios();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Portfolio processing failed.");
+      const msg = err instanceof Error ? err.message : "Portfolio processing failed.";
+      if (msg.includes("Historical inputs changed before last equity history date")) {
+        try {
+          await rebuildPortfolioEquityHistory(selectedPortfolioId, {
+            mode: "full",
+            force: true,
+            strict: strictMode,
+          });
+          await loadPortfolioState(selectedPortfolioId);
+          setTxDirty(false);
+          await loadPortfolios();
+          setError("");
+        } catch (fallbackErr) {
+          setError(fallbackErr instanceof Error ? fallbackErr.message : msg);
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -395,6 +434,11 @@ export default function Portfolio() {
     try {
       const res = await updatePortfolioSettings(selectedPortfolioId, next);
       setPortfolioSettings(res?.data || null);
+      await rebuildPortfolioEquityHistory(selectedPortfolioId, {
+        mode: "full",
+        force: true,
+        strict: strictMode,
+      });
       await loadPortfolioState(selectedPortfolioId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update portfolio settings.");
@@ -431,6 +475,9 @@ export default function Portfolio() {
             <Link to={createPageUrl("Portfolios")}>
               <Button variant="outline">All Portfolios</Button>
             </Link>
+            <Button variant="outline" size="icon" onClick={() => setSettingsOpen(true)} title="Portfolio settings">
+              <Settings className="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
@@ -457,12 +504,46 @@ export default function Portfolio() {
           </label>
         </div>
 
-        <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3 space-y-2">
-          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">Portfolio Settings</p>
-          <div className="grid md:grid-cols-2 gap-2 text-sm">
+        <div className="flex items-center gap-3">
+          <Button onClick={handleImportCsv} disabled={isImporting || !selectedPortfolioId}>
+            {isImporting ? "Importing..." : "Import CSV"}
+          </Button>
+          <Button onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>
+            {isProcessing ? "Processing..." : "Reprocess Now"}
+          </Button>
+          {error && <Button variant="outline" onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>Retry</Button>}
+        </div>
+
+        {txDirty && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+            Portfolio has unprocessed changes. Re-run processing to update metrics.
+            <Button size="sm" className="ml-3" onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>
+              Reprocess Now
+            </Button>
+          </div>
+        )}
+
+        {isLoading && <p className="text-xs text-slate-500 dark:text-slate-400">Loading portfolios...</p>}
+        {equityHistoryNotice && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+            {equityHistoryNotice}
+          </div>
+        )}
+        {error && <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+      </div>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Portfolio Settings</DialogTitle>
+            <DialogDescription>
+              Configure cash/performance behavior for this portfolio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
             <div>
               <p className="text-slate-500">Base Currency</p>
-              <p className="font-medium">{portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD"}</p>
+              <p className="font-medium">{displayCurrency}</p>
             </div>
             <label className="flex items-center gap-2">
               <input
@@ -504,35 +585,11 @@ export default function Portfolio() {
               Reinvest dividends overlay
             </label>
           </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <Button onClick={handleImportCsv} disabled={isImporting || !selectedPortfolioId}>
-            {isImporting ? "Importing..." : "Import CSV"}
-          </Button>
-          <Button onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>
-            {isProcessing ? "Processing..." : "Reprocess Now"}
-          </Button>
-          {error && <Button variant="outline" onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>Retry</Button>}
-        </div>
-
-        {txDirty && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-            Portfolio has unprocessed changes. Re-run processing to update metrics.
-            <Button size="sm" className="ml-3" onClick={handleProcess} disabled={isProcessing || !selectedPortfolioId}>
-              Reprocess Now
-            </Button>
-          </div>
-        )}
-
-        {isLoading && <p className="text-xs text-slate-500 dark:text-slate-400">Loading portfolios...</p>}
-        {equityHistoryNotice && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-            {equityHistoryNotice}
-          </div>
-        )}
-        {error && <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
-      </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettingsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {!result && !metadata && selectedPortfolio && transactions.length === 0 && !equityHistoryNotice && (
         <div className="rounded-xl border border-slate-200 bg-white p-6">
@@ -573,19 +630,19 @@ export default function Portfolio() {
                 </div>
               )}
               <div className="grid md:grid-cols-3 gap-3 text-sm">
-                <div><p className="text-slate-500">Total Equity</p><p className="font-medium">{fmtNumber(dashboardSummary?.total_equity)}</p></div>
+                <div><p className="text-slate-500">Total Equity</p><p className="font-medium">{fmtCurrency(dashboardSummary?.total_equity, displayCurrency)}</p></div>
                 <div>
                   <p className="text-slate-500">Day Change</p>
-                  <p className="font-medium">{fmtNumber(dashboardSummary?.day_change_value)} ({fmtPercent(dashboardSummary?.day_change_percent)})</p>
+                  <p className="font-medium">{fmtCurrency(dashboardSummary?.day_change_value, displayCurrency)} ({fmtPercent(dashboardSummary?.day_change_percent)})</p>
                 </div>
                 <div>
                   <p className="text-slate-500">Unrealized Gain/Loss</p>
-                  <p className="font-medium">{fmtNumber(dashboardSummary?.unrealized_gain_value)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
+                  <p className="font-medium">{fmtCurrency(dashboardSummary?.unrealized_gain_value, displayCurrency)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
                 </div>
-                <div><p className="text-slate-500">Market Move Component</p><p className="font-medium">{fmtNumber(dashboardSummary?.market_move_component)}</p></div>
-                <div><p className="text-slate-500">Currency Move Component</p><p className="font-medium">{fmtNumber(dashboardSummary?.currency_move_component)}</p></div>
-                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtNumber(dashboardSummary?.realized_gain_value)}</p></div>
-                <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtNumber(dashboardSummary?.cash_balance)}</p></div>
+                <div><p className="text-slate-500">Market Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.market_move_component, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">FX Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.currency_move_component, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtCurrency(dashboardSummary?.realized_gain_value, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtCurrency(dashboardSummary?.cash_balance, displayCurrency)}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
               </div>
 
@@ -602,10 +659,6 @@ export default function Portfolio() {
                       <option value="twr">Time-Weighted Return</option>
                       <option value="net_of_contributions">Net of Contributions</option>
                     </select>
-                    <label className="text-xs flex items-center gap-1">
-                      <input type="checkbox" checked={showFxImpact} onChange={(e) => setShowFxImpact(e.target.checked)} />
-                      Show FX Impact
-                    </label>
                     <select
                       value={equityRange}
                       onChange={(e) => setEquityRange(e.target.value)}
@@ -620,13 +673,16 @@ export default function Portfolio() {
                     <LineChart data={equitySeries}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="date" />
-                      <YAxis />
+                      <YAxis orientation="right" />
                       <Tooltip
-                        formatter={(v) => fmtNumber(v)}
-                        labelFormatter={(label, payload) => {
+                        contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0" }}
+                        formatter={(_, __, item) => {
+                          const row = item?.payload;
+                          return [fmtPercent(row?.twr_return_pct), "Return"];
+                        }}
+                        labelFormatter={(_, payload) => {
                           const row = payload?.[0]?.payload;
-                          if (!row) return label;
-                          return `${label} | Total ${fmtNumber(row.total_equity)} | Day ${fmtNumber(row.day_change_value)} | CumRet ${fmtPercent(row.twr_return_pct)} | NetContrib ${fmtNumber(row.cumulative_net_contribution)}`;
+                          return row?.date || "";
                         }}
                       />
                       <Line type="monotone" dataKey="plotted_value" stroke="#0f172a" dot={false} strokeWidth={2} />
@@ -662,16 +718,16 @@ export default function Portfolio() {
                         <tr key={row.ticker} className="border-b">
                           <td className="py-2 font-mono">{row.ticker}</td>
                           <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
-                          <td className="py-2">{fmtNumber(row.avg_cost_basis, 4)}</td>
-                          <td className="py-2">{fmtNumber(row.total_cost_basis)}</td>
-                          <td className="py-2">{fmtNumber(row.market_price, 4)}</td>
-                          <td className="py-2">{fmtNumber(row.market_value)}</td>
-                          <td className="py-2">{fmtNumber(row.day_change_value)} ({fmtPercent(row.day_change_percent)})</td>
-                          <td className="py-2">{fmtNumber(row.price_return_value)}</td>
-                          <td className="py-2">{fmtNumber(row.fx_return_value)}</td>
-                          <td className="py-2">{fmtNumber(row.combined_return_value)}</td>
-                          <td className="py-2">{fmtNumber(row.unrealized_gain_value)} ({fmtPercent(row.unrealized_gain_percent)})</td>
-                          <td className="py-2">{fmtNumber(row.realized_gain_value)}</td>
+                          <td className="py-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.day_change_value, displayCurrency)} ({fmtPercent(row.day_change_percent)})</td>
+                          <td className="py-2">{fmtCurrency(row.price_return_value, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.fx_return_value, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.combined_return_value, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.unrealized_gain_value, displayCurrency)} ({fmtPercent(row.unrealized_gain_percent)})</td>
+                          <td className="py-2">{fmtCurrency(row.realized_gain_value, displayCurrency)}</td>
                         </tr>
                       ))
                     )}
@@ -755,8 +811,8 @@ export default function Portfolio() {
                         <td className="py-2 font-mono">{tx.ticker}</td>
                         <td className="py-2">{tx.type}</td>
                         <td className="py-2">{tx.shares}</td>
-                        <td className="py-2">{tx.price}</td>
-                        <td className="py-2">{fmtNumber((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0))}</td>
+                        <td className="py-2">{fmtCurrency(tx.price, displayCurrency)}</td>
+                        <td className="py-2">{fmtCurrency((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0), displayCurrency)}</td>
                         <td className="py-2">
                           <div className="flex gap-2">
                             <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>

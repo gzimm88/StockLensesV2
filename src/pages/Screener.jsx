@@ -753,8 +753,8 @@ export default function Screener() {
 
       const confidence = calculateConfidencePct(metric);
       const { rec, mosStatus, confStatus } = recommend(finalScore, mos, {
-        buy: lensConfig.buy,
-        watch: lensConfig.watch,
+        buy: buyMin,
+        watch: watchMin,
         mos: lensConfig.mos,
         conf: lensConfig.conf,
         confidence,
@@ -1301,7 +1301,7 @@ export default function Screener() {
                     />
 
                     <div className="text-xs text-slate-500 bg-white px-2 py-1 rounded border">
-                        Buy ≥{(lensConfig.buy || 7.1).toFixed(1)} | Watch ≥{(lensConfig.watch || 4.5).toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
+                        Buy ≥{buyMin.toFixed(1)} | Watch ≥{watchMin.toFixed(1)}{lensConfig.mos > 0 ? ` | MOS ≥${lensConfig.mos}%` : ''}{lensConfig.conf > 0 ? ` | Conf ≥${lensConfig.conf}%` : ''}
                     </div>
 
                 </div>
@@ -1431,7 +1431,7 @@ export default function Screener() {
                                                 <p className="font-semibold">Based on {selectedLens.name}</p>
                                                 {lensConfig && (
                                                     <p>
-                                                      Buy≥{(lensConfig.buy || 7.1).toFixed(1)}, Watch≥{(lensConfig.watch || 4.5).toFixed(1)}
+                                                      Buy≥{buyMin.toFixed(1)}, Watch≥{watchMin.toFixed(1)}
                                                       {lensConfig.mos > 0 ? `, MOS≥${lensConfig.mos}%` : ''}
                                                       {lensConfig.conf > 0 ? `, Conf≥${lensConfig.conf}%` : ''}
                                                     </p>
