@@ -15,6 +15,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_transaction,
     get_portfolio_equity_history,
     rebuild_equity_history,
+    update_portfolio_settings,
 )
 from backend.services.portfolio_engine import PortfolioEngineError
 
@@ -238,3 +239,46 @@ def test_non_base_valuation_uses_close_fx_execution_fx_only_for_cash():
     assert len(history["series"]) == 2
     # cash booked at execution FX 1.2 => -1200; day1 market uses close FX 1.1 => 1100; total=-100
     assert history["series"][-1]["total_equity"] == -100.0
+    assert history["series"][-1]["fx_return_component"] == -100.0
+    assert history["series"][-1]["market_return_component"] == 0.0
+
+
+def test_contribution_neutrality_in_net_of_contributions_mode():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="ContributionNeutral")
+    d0 = date.today() - timedelta(days=2)
+    d1 = date.today() - timedelta(days=1)
+    _seed_price(db, "AAPL", d0, 100)
+    _seed_price(db, "AAPL", d1, 100)
+    update_portfolio_settings(db, portfolio_id, cash_management_mode="ignore_cash")
+    create_transaction(
+        db,
+        portfolio_id=portfolio_id,
+        ticker="AAPL",
+        tx_type="BUY",
+        quantity=10,
+        price=100,
+        trade_date=d0,
+        currency="USD",
+    )
+    create_transaction(
+        db,
+        portfolio_id=portfolio_id,
+        ticker="AAPL",
+        tx_type="BUY",
+        quantity=5,
+        price=100,
+        trade_date=d1,
+        currency="USD",
+    )
+    rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+    history = get_portfolio_equity_history(
+        db,
+        portfolio_id,
+        range_label="ALL",
+        performance_mode="net_of_contributions",
+    )
+    assert len(history["series"]) == 2
+    assert history["series"][1]["day_change_value"] == 500.0
+    assert history["series"][1]["net_contribution"] == 500.0
+    assert history["series"][1]["plotted_value"] == history["series"][0]["plotted_value"]

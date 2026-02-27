@@ -1,7 +1,16 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { createPageUrl } from "@/utils";
 import { Ticker } from "@/api/entities";
 import {
@@ -9,8 +18,9 @@ import {
   createPortfolioTransaction,
   deletePortfolioTransaction,
   getPortfolioDashboardSummary,
-  getPortfolioEquityHistory,
+  getPortfolioEquityHistorySeries,
   getPortfolioHoldings,
+  getPortfolioSettings,
   getLastPortfolioRun,
   getValuationAttribution,
   getValuationDiff,
@@ -19,6 +29,8 @@ import {
   listPortfolioTransactions,
   listPortfolios,
   processPortfolio,
+  rebuildPortfolioEquityHistory,
+  updatePortfolioSettings,
   updatePortfolioTransaction,
 } from "@/api/portfolio";
 import AttributionPanel from "@/components/portfolio/AttributionPanel";
@@ -48,9 +60,44 @@ function fmtNumber(value, digits = 2) {
   return Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+function fmtCurrency(value, currency = "USD") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return Number(value).toLocaleString("en-US", {
+    style: "currency",
+    currency,
+    currencySign: "accounting",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function fmtPercent(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return `${fmtNumber(value, digits)}%`;
+}
+
+function fmtAxisNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
+function parseIsoDate(value) {
+  if (!value || typeof value !== "string") return null;
+  const d = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatYahooXAxisTick(value) {
+  const d = parseIsoDate(value);
+  if (!d) return "";
+  const day = d.getUTCDate();
+  if (day <= 7) {
+    return d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+  }
+  return `${day}`;
 }
 
 const EMPTY_TX = {
@@ -85,14 +132,61 @@ export default function Portfolio() {
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
   const [holdingsRows, setHoldingsRows] = React.useState([]);
   const [equityRange, setEquityRange] = React.useState("6M");
+  const [performanceMode, setPerformanceMode] = React.useState("value");
+  const [hoveredEquity, setHoveredEquity] = React.useState(null);
   const [equitySeries, setEquitySeries] = React.useState([]);
+  const [portfolioSettings, setPortfolioSettings] = React.useState(null);
+  const [isSavingSettings, setIsSavingSettings] = React.useState(false);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
   const [editTxId, setEditTxId] = React.useState(null);
   const [knownTickers, setKnownTickers] = React.useState([]);
+  const [holdingsSortField, setHoldingsSortField] = React.useState("market_value");
+  const [holdingsSortDirection, setHoldingsSortDirection] = React.useState("desc");
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
+  const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
+  const trackCashEnabled = (portfolioSettings?.cash_management_mode || "track_cash") === "track_cash";
+  const equityPerformanceMode = performanceMode === "growth" ? "net_of_contributions" : "absolute";
+  const latestEquityPoint = equitySeries.length > 0 ? equitySeries[equitySeries.length - 1] : null;
+  const rightSideMetric = performanceMode === "growth"
+    ? fmtPercent((hoveredEquity?.twr_return_pct ?? latestEquityPoint?.twr_return_pct))
+    : fmtCurrency((hoveredEquity?.plotted_value ?? latestEquityPoint?.plotted_value), displayCurrency);
+
+  const sortedHoldingsRows = React.useMemo(() => {
+    const rows = holdingsRows.map((row) => {
+      const basis = Number(row?.total_cost_basis || 0);
+      const realized = Number(row?.realized_gain_value || 0);
+      const realizedPct = basis !== 0 ? (realized / basis) * 100 : null;
+      return { ...row, realized_gain_percent: realizedPct };
+    });
+    const dir = holdingsSortDirection === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      const av = a?.[holdingsSortField];
+      const bv = b?.[holdingsSortField];
+      const an = typeof av === "number" ? av : Number(av);
+      const bn = typeof bv === "number" ? bv : Number(bv);
+      if (!Number.isNaN(an) && !Number.isNaN(bn)) return (an - bn) * dir;
+      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+    });
+    return rows;
+  }, [holdingsRows, holdingsSortDirection, holdingsSortField]);
+
+  const toggleHoldingsSort = (field) => {
+    if (holdingsSortField === field) {
+      setHoldingsSortDirection((p) => (p === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setHoldingsSortField(field);
+    setHoldingsSortDirection("desc");
+  };
+
+  const sortIndicator = (field) => {
+    if (holdingsSortField !== field) return "";
+    return holdingsSortDirection === "desc" ? "▾" : "▴";
+  };
 
   const loadPortfolios = React.useCallback(async () => {
     const res = await listPortfolios();
@@ -136,6 +230,7 @@ export default function Portfolio() {
         setDashboardSummary(null);
         setHoldingsRows([]);
         setEquitySeries([]);
+        setPortfolioSettings(null);
         setEquityHistoryNotice("");
         return;
       }
@@ -146,7 +241,12 @@ export default function Portfolio() {
         getValuationDiff(portfolioId),
         getPortfolioDashboardSummary(portfolioId),
         getPortfolioHoldings(portfolioId),
-        getPortfolioEquityHistory(portfolioId, equityRange),
+        getPortfolioEquityHistorySeries(portfolioId, {
+          range: equityRange,
+          performanceMode: equityPerformanceMode,
+          showFxImpact: false,
+        }),
+        getPortfolioSettings(portfolioId),
       ]);
 
       const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
@@ -162,6 +262,7 @@ export default function Portfolio() {
       const summaryData = getSettledData(4);
       const holdingsData = getSettledData(5);
       const historyData = getSettledData(6);
+      const settingsData = getSettledData(7);
 
       const summaryErr = getSettledError(4);
       const historyErr = getSettledError(6);
@@ -174,6 +275,7 @@ export default function Portfolio() {
       setDashboardSummary(summaryData);
       setHoldingsRows(holdingsData?.holdings || []);
       setEquitySeries(historyData?.series || []);
+      setPortfolioSettings(settingsData);
       setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
 
       const nonHistoryErrors = [
@@ -182,6 +284,7 @@ export default function Portfolio() {
         getSettledError(2),
         getSettledError(3),
         getSettledError(5),
+        getSettledError(7),
       ].filter(Boolean);
       const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
       const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
@@ -191,7 +294,7 @@ export default function Portfolio() {
 
       await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions, equityRange]
+    [loadTransactions, equityRange, equityPerformanceMode]
   );
 
   React.useEffect(() => {
@@ -224,6 +327,7 @@ export default function Portfolio() {
       setDashboardSummary(null);
       setHoldingsRows([]);
       setEquitySeries([]);
+      setPortfolioSettings(null);
       setEquityHistoryNotice("");
       setTxDirty(false);
       setError("");
@@ -241,13 +345,17 @@ export default function Portfolio() {
     if (!selectedPortfolioId) return;
     (async () => {
       try {
-        const history = await getPortfolioEquityHistory(selectedPortfolioId, equityRange);
+        const history = await getPortfolioEquityHistorySeries(selectedPortfolioId, {
+          range: equityRange,
+          performanceMode: equityPerformanceMode,
+          showFxImpact: false,
+        });
         setEquitySeries(history?.data?.series || []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load equity history.");
       }
     })();
-  }, [selectedPortfolioId, equityRange]);
+  }, [selectedPortfolioId, equityRange, equityPerformanceMode]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -297,7 +405,24 @@ export default function Portfolio() {
       setTxDirty(false);
       await loadPortfolios();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Portfolio processing failed.");
+      const msg = err instanceof Error ? err.message : "Portfolio processing failed.";
+      if (msg.includes("Historical inputs changed before last equity history date")) {
+        try {
+          await rebuildPortfolioEquityHistory(selectedPortfolioId, {
+            mode: "full",
+            force: true,
+            strict: strictMode,
+          });
+          await loadPortfolioState(selectedPortfolioId);
+          setTxDirty(false);
+          await loadPortfolios();
+          setError("");
+        } catch (fallbackErr) {
+          setError(fallbackErr instanceof Error ? fallbackErr.message : msg);
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -357,6 +482,7 @@ export default function Portfolio() {
 
   const deleteTx = async (txId) => {
     if (!selectedPortfolioId) return;
+    if (!window.confirm("Delete this transaction? This action is soft-delete and will require rebuild.")) return;
     setError("");
     try {
       await deletePortfolioTransaction(selectedPortfolioId, txId);
@@ -364,6 +490,26 @@ export default function Portfolio() {
       setTxDirty(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete transaction.");
+    }
+  };
+
+  const saveSettings = async (next) => {
+    if (!selectedPortfolioId) return;
+    setIsSavingSettings(true);
+    setError("");
+    try {
+      const res = await updatePortfolioSettings(selectedPortfolioId, next);
+      setPortfolioSettings(res?.data || null);
+      await rebuildPortfolioEquityHistory(selectedPortfolioId, {
+        mode: "full",
+        force: true,
+        strict: strictMode,
+      });
+      await loadPortfolioState(selectedPortfolioId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update portfolio settings.");
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -395,6 +541,9 @@ export default function Portfolio() {
             <Link to={createPageUrl("Portfolios")}>
               <Button variant="outline">All Portfolios</Button>
             </Link>
+            <Button variant="outline" size="icon" onClick={() => setSettingsOpen(true)} title="Portfolio settings">
+              <Settings className="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
@@ -449,6 +598,65 @@ export default function Portfolio() {
         {error && <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
       </div>
 
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Portfolio Settings</DialogTitle>
+            <DialogDescription>
+              Configure cash/performance behavior for this portfolio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div>
+              <p className="text-slate-500">Base Currency</p>
+              <p className="font-medium">{displayCurrency}</p>
+            </div>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={(portfolioSettings?.cash_management_mode || "track_cash") === "track_cash"}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    cash_management_mode: e.target.checked ? "track_cash" : "ignore_cash",
+                  })
+                }
+              />
+              Track cash balance
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={Boolean(portfolioSettings?.include_dividends_in_performance ?? true)}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    include_dividends_in_performance: e.target.checked,
+                  })
+                }
+              />
+              Include dividends in performance
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={Boolean(portfolioSettings?.reinvest_dividends_overlay ?? false)}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    reinvest_dividends_overlay: e.target.checked,
+                  })
+                }
+              />
+              Reinvest dividends overlay
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettingsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {!result && !metadata && selectedPortfolio && transactions.length === 0 && !equityHistoryNotice && (
         <div className="rounded-xl border border-slate-200 bg-white p-6">
           <h2 className="text-lg font-semibold">No transactions yet</h2>
@@ -488,75 +696,176 @@ export default function Portfolio() {
                 </div>
               )}
               <div className="grid md:grid-cols-3 gap-3 text-sm">
-                <div><p className="text-slate-500">Total Equity</p><p className="font-medium">{fmtNumber(dashboardSummary?.total_equity)}</p></div>
+                <div><p className="text-slate-500">Total Equity</p><p className="font-medium">{fmtCurrency(dashboardSummary?.total_equity, displayCurrency)}</p></div>
                 <div>
                   <p className="text-slate-500">Day Change</p>
-                  <p className="font-medium">{fmtNumber(dashboardSummary?.day_change_value)} ({fmtPercent(dashboardSummary?.day_change_percent)})</p>
+                  <p className="font-medium">{fmtCurrency(dashboardSummary?.day_change_value, displayCurrency)} ({fmtPercent(dashboardSummary?.day_change_percent)})</p>
                 </div>
                 <div>
                   <p className="text-slate-500">Unrealized Gain/Loss</p>
-                  <p className="font-medium">{fmtNumber(dashboardSummary?.unrealized_gain_value)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
+                  <p className="font-medium">{fmtCurrency(dashboardSummary?.unrealized_gain_value, displayCurrency)} ({fmtPercent(dashboardSummary?.unrealized_gain_percent)})</p>
                 </div>
-                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtNumber(dashboardSummary?.realized_gain_value)}</p></div>
-                <div><p className="text-slate-500">Cash</p><p className="font-medium">{fmtNumber(dashboardSummary?.cash_balance)}</p></div>
+                <div><p className="text-slate-500">Market Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.market_move_component, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">FX Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.currency_move_component, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtCurrency(dashboardSummary?.realized_gain_value, displayCurrency)}</p></div>
+                <div><p className="text-slate-500">Cash</p><p className="font-medium">{trackCashEnabled ? fmtCurrency(dashboardSummary?.cash_balance, displayCurrency) : "--"}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
               </div>
 
               <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold">Equity Curve</h3>
-                  <select
-                    value={equityRange}
-                    onChange={(e) => setEquityRange(e.target.value)}
-                    className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
-                  >
-                    {["1M", "3M", "6M", "1Y", "5Y", "MAX"].map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={performanceMode}
+                      onChange={(e) => setPerformanceMode(e.target.value)}
+                      className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
+                    >
+                      <option value="value">Holdings Value</option>
+                      <option value="growth">Holdings Growth</option>
+                    </select>
+                    <select
+                      value={equityRange}
+                      onChange={(e) => setEquityRange(e.target.value)}
+                      className="border rounded-md px-2 py-1 text-sm bg-white dark:bg-slate-900"
+                    >
+                      {["1D", "5D", "1W", "1M", "3M", "6M", "1Y", "ALL"].map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
                 </div>
-                <div className="h-56">
+                <div className="h-56 rounded-md border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-2 relative">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={equitySeries}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="date" />
-                      <YAxis />
-                      <Tooltip formatter={(v) => fmtNumber(v)} />
-                      <Line type="monotone" dataKey="total_equity" stroke="#0f172a" dot={false} strokeWidth={2} />
-                    </LineChart>
+                    <AreaChart
+                      data={equitySeries}
+                      margin={{ top: 8, right: 62, left: 8, bottom: 28 }}
+                      onMouseMove={(state) => {
+                        const p = state?.activePayload?.[0]?.payload;
+                        const c = state?.activeCoordinate;
+                        if (!p || !c) {
+                          setHoveredEquity(null);
+                          return;
+                        }
+                        setHoveredEquity({
+                          date: p.date,
+                          plotted_value: p.plotted_value,
+                          twr_return_pct: p.twr_return_pct,
+                          x: c.x,
+                          y: c.y,
+                        });
+                      }}
+                      onMouseLeave={() => setHoveredEquity(null)}
+                    >
+                      <defs>
+                        <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.05} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={formatYahooXAxisTick}
+                        minTickGap={24}
+                        tickMargin={8}
+                        tick={{ fontSize: 10, fill: "#94a3b8", fontWeight: 400 }}
+                      />
+                      <YAxis
+                        orientation="right"
+                        tickFormatter={(v) => (performanceMode === "growth" ? fmtPercent(v) : fmtAxisNumber(v))}
+                        tickMargin={6}
+                        tick={{ fontSize: 9, fill: "#94a3b8", fontWeight: 400 }}
+                        width={58}
+                      />
+                      <Tooltip
+                        cursor={{ stroke: "#64748b", strokeDasharray: "4 4" }}
+                        content={() => null}
+                      />
+                      <Area type="monotone" dataKey="plotted_value" stroke="none" fill="url(#equityFill)" />
+                      {hoveredEquity && (
+                        <ReferenceLine y={hoveredEquity.plotted_value} stroke="#94a3b8" strokeDasharray="4 4" />
+                      )}
+                      {latestEquityPoint && (
+                        <ReferenceLine
+                          y={latestEquityPoint.plotted_value}
+                          stroke="#10b981"
+                          strokeDasharray="6 6"
+                        />
+                      )}
+                      <Line type="monotone" dataKey="plotted_value" stroke="#0ea5e9" dot={false} strokeWidth={2.5} />
+                    </AreaChart>
                   </ResponsiveContainer>
+                  <div className="absolute right-2 top-10 px-2 py-0.5 rounded text-white bg-emerald-700 text-[10px] font-medium leading-4">
+                    {rightSideMetric}
+                  </div>
+                  {hoveredEquity?.date && (
+                    <div
+                      className="absolute px-2 py-0.5 rounded text-white bg-slate-800 text-[10px] leading-4"
+                      style={{ left: `calc(${hoveredEquity.x}px - 45px)`, bottom: 2 }}
+                    >
+                      {new Date(`${hoveredEquity.date}T00:00:00Z`).toLocaleDateString("en-US")}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="overflow-x-auto">
-                <h3 className="text-sm font-semibold mb-2">Holdings</h3>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold">Holdings</h3>
+                  <span className="text-xs text-slate-500">
+                    Sorted by {holdingsSortField.replaceAll("_", " ")} {holdingsSortDirection === "desc" ? "↓" : "↑"}
+                  </span>
+                </div>
                 <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-2">Ticker</th>
-                      <th className="text-left py-2">Quantity</th>
-                      <th className="text-left py-2">Avg Cost</th>
-                      <th className="text-left py-2">Total Cost Basis</th>
-                      <th className="text-left py-2">Market Price</th>
-                      <th className="text-left py-2">Market Value</th>
-                      <th className="text-left py-2">Day Change</th>
-                      <th className="text-left py-2">Unrealized</th>
-                      <th className="text-left py-2">Realized</th>
+                    <tr className="border-b bg-slate-900 text-slate-100">
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("ticker")}>Symbol {sortIndicator("ticker")}</button></th>
+                      <th className="text-left py-2 px-2">Status</th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("quantity")}>Shares {sortIndicator("quantity")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_price")}>Last Price {sortIndicator("market_price")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("avg_cost_basis")}>AC/Share {sortIndicator("avg_cost_basis")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost ({displayCurrency}) {sortIndicator("total_cost_basis")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_value")}>Market Value ({displayCurrency}) {sortIndicator("market_value")}</button></th>
+                      <th className="text-left py-2 px-2">Tot Div Income ({displayCurrency})</th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_percent")}>Day Gain UNRL (%) {sortIndicator("day_change_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain UNRL ({displayCurrency}) {sortIndicator("day_change_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_percent")}>Tot Gain UNRL (%) {sortIndicator("unrealized_gain_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL ({displayCurrency}) {sortIndicator("unrealized_gain_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_percent")}>Realized Gain (%) {sortIndicator("realized_gain_percent")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_value")}>Realized Gain ({displayCurrency}) {sortIndicator("realized_gain_value")}</button></th>
                     </tr>
                   </thead>
                   <tbody>
                     {holdingsRows.length === 0 ? (
-                      <tr><td colSpan={9} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
+                      <tr><td colSpan={14} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
-                      holdingsRows.map((row) => (
-                        <tr key={row.ticker} className="border-b">
-                          <td className="py-2 font-mono">{row.ticker}</td>
-                          <td className="py-2">{fmtNumber(row.quantity, 6)}</td>
-                          <td className="py-2">{fmtNumber(row.avg_cost_basis, 4)}</td>
-                          <td className="py-2">{fmtNumber(row.total_cost_basis)}</td>
-                          <td className="py-2">{fmtNumber(row.market_price, 4)}</td>
-                          <td className="py-2">{fmtNumber(row.market_value)}</td>
-                          <td className="py-2">{fmtNumber(row.day_change_value)} ({fmtPercent(row.day_change_percent)})</td>
-                          <td className="py-2">{fmtNumber(row.unrealized_gain_value)} ({fmtPercent(row.unrealized_gain_percent)})</td>
-                          <td className="py-2">{fmtNumber(row.realized_gain_value)}</td>
+                      sortedHoldingsRows.map((row) => (
+                        <tr key={row.ticker} className="border-b hover:bg-slate-50">
+                          <td className="py-2 px-2 font-mono text-blue-700">{row.ticker}</td>
+                          <td className="py-2 px-2">Open</td>
+                          <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
+                          <td className="py-2 px-2">--</td>
+                          <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtPercent(row.day_change_percent)}
+                          </td>
+                          <td className={`py-2 px-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.day_change_value, displayCurrency)}
+                          </td>
+                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtPercent(row.unrealized_gain_percent)}
+                          </td>
+                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
+                          </td>
+                          <td className={`py-2 px-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
+                          </td>
+                          <td className={`py-2 px-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.realized_gain_value, displayCurrency)}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -640,8 +949,8 @@ export default function Portfolio() {
                         <td className="py-2 font-mono">{tx.ticker}</td>
                         <td className="py-2">{tx.type}</td>
                         <td className="py-2">{tx.shares}</td>
-                        <td className="py-2">{tx.price}</td>
-                        <td className="py-2">{tx.total}</td>
+                        <td className="py-2">{fmtCurrency(tx.price, displayCurrency)}</td>
+                        <td className="py-2">{fmtCurrency((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0), displayCurrency)}</td>
                         <td className="py-2">
                           <div className="flex gap-2">
                             <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>
