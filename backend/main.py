@@ -19,15 +19,18 @@ from sqlalchemy.orm import Session
 
 from backend.database import Base, SessionLocal, engine, get_db
 from backend.models import (
+    FXRate,
     FinancialsHistory,
     LensPreset,
     Metrics,
     Portfolio,
     PortfolioCorrectionEvent,
     PortfolioCoverageEvent,
+    PortfolioSnapshot,
     PortfolioProcessingRun,
     PortfolioSettings,
     PortfolioTransaction,
+    PriceHistory,
     PricesHistory,
     ScoreSnapshot,
     Ticker,
@@ -71,6 +74,7 @@ from backend.orchestrator.portfolio_orchestrator import (
 )
 from backend.repositories import financials_repo, metrics_repo, prices_repo
 from backend.services.portfolio_engine import PortfolioEngineError
+from backend.scheduler import start_market_data_scheduler, stop_market_data_scheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -261,6 +265,100 @@ def _ensure_phase11_schema() -> None:
 
 
 _ensure_phase11_schema()
+
+
+def _ensure_phase12a_schema() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id VARCHAR PRIMARY KEY,
+                    ticker VARCHAR NOT NULL,
+                    datetime_utc DATETIME NOT NULL,
+                    price FLOAT NOT NULL,
+                    adjusted_price FLOAT,
+                    source VARCHAR,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_price_history_ticker_datetime "
+                "ON price_history (ticker, datetime_utc)"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_price_history_ticker ON price_history (ticker)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_price_history_datetime_utc ON price_history (datetime_utc)"))
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS fx_rates (
+                    id VARCHAR PRIMARY KEY,
+                    base_currency VARCHAR NOT NULL,
+                    quote_currency VARCHAR NOT NULL,
+                    datetime_utc DATETIME NOT NULL,
+                    rate FLOAT NOT NULL,
+                    source VARCHAR,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_fx_rates_pair_datetime "
+                "ON fx_rates (base_currency, quote_currency, datetime_utc)"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_fx_rates_base_currency ON fx_rates (base_currency)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_fx_rates_quote_currency ON fx_rates (quote_currency)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_fx_rates_datetime_utc ON fx_rates (datetime_utc)"))
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                    id VARCHAR PRIMARY KEY,
+                    portfolio_id VARCHAR NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    total_equity NUMERIC(24,10) NOT NULL,
+                    total_cash NUMERIC(24,10) NOT NULL,
+                    unrealized NUMERIC(24,10) NOT NULL,
+                    realized NUMERIC(24,10) NOT NULL,
+                    market_component NUMERIC(24,10) NOT NULL,
+                    fx_component NUMERIC(24,10) NOT NULL,
+                    created_at DATETIME,
+                    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_portfolio_snapshots_portfolio_date "
+                "ON portfolio_snapshots (portfolio_id, snapshot_date)"
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_portfolio_snapshots_snapshot_date ON portfolio_snapshots (snapshot_date)")
+        )
+
+
+_ensure_phase12a_schema()
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    start_market_data_scheduler()
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    stop_market_data_scheduler()
 
 
 def _bootstrap_default_portfolio() -> None:

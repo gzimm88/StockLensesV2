@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.database import Base
-from backend.models import Portfolio, PricesHistory
+from backend.models import FXRate, Portfolio, PriceHistory
 from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
@@ -48,18 +48,29 @@ def _seed_portfolio(db: Session, *, name: str = "EquityHistory") -> str:
 
 def _seed_price(db: Session, ticker: str, d: date, close: float) -> None:
     db.add(
-        PricesHistory(
+        PriceHistory(
             id=str(uuid.uuid4()),
             ticker=ticker,
-            date=d,
-            close=close,
-            close_adj=close,
-            open=close,
-            high=close,
-            low=close,
-            volume=1000,
+            datetime_utc=datetime(d.year, d.month, d.day, 20, 0, 0),
+            price=close,
+            adjusted_price=None,
             source="seed",
-            as_of_date=d,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+
+def _seed_fx(db: Session, quote_currency: str, d: date, rate: float) -> None:
+    db.add(
+        FXRate(
+            id=str(uuid.uuid4()),
+            base_currency="USD",
+            quote_currency=quote_currency,
+            datetime_utc=datetime(d.year, d.month, d.day, 20, 0, 0),
+            rate=rate,
+            source="seed",
+            created_at=datetime.utcnow(),
         )
     )
     db.commit()
@@ -219,8 +230,8 @@ def test_non_base_valuation_uses_close_fx_execution_fx_only_for_cash():
     portfolio_id = _seed_portfolio(db, name="FXRules")
     d0 = date.today() - timedelta(days=2)
     d1 = date.today() - timedelta(days=1)
-    _seed_price(db, "EURUSD=X", d0, 1.2)
-    _seed_price(db, "EURUSD=X", d1, 1.1)
+    _seed_fx(db, "EUR", d0, 1.2)
+    _seed_fx(db, "EUR", d1, 1.1)
     create_transaction(
         db,
         portfolio_id=portfolio_id,

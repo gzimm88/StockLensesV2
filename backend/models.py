@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -511,4 +511,50 @@ class PortfolioEquityHistoryRow(Base):
     fx_return_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False, default=0)
     twr_index: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False, default=1)
     input_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PriceHistory(Base):
+    __tablename__ = "price_history"
+    __table_args__ = (UniqueConstraint("ticker", "datetime_utc", name="uq_price_history_ticker_datetime"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    datetime_utc: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    adjusted_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class FXRate(Base):
+    __tablename__ = "fx_rates"
+    __table_args__ = (
+        UniqueConstraint("base_currency", "quote_currency", "datetime_utc", name="uq_fx_rates_pair_datetime"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    base_currency: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    quote_currency: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    datetime_utc: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    rate: Mapped[float] = mapped_column(Float, nullable=False)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "snapshot_date", name="uq_portfolio_snapshots_portfolio_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), nullable=False, index=True)
+    snapshot_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    total_equity: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    total_cash: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    unrealized: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    realized: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    market_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    fx_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
