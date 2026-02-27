@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from backend.api_clients import yahoo_client
 from backend.models import (
+    ClosedPosition,
     CorporateAction,
     FXRate,
     FXRateSnapshot,
@@ -2871,6 +2872,8 @@ def rebuild_equity_history(
 
     lots: dict[str, list[tuple[Decimal, Decimal]]] = defaultdict(list)
     closed_tickers: set[str] = set()
+    active_close_cycles: dict[str, dict[str, Decimal | date]] = {}
+    closed_rows_raw: list[dict[str, object]] = []
     cash = Decimal("0")
     realized_total = Decimal("0")
     prev_included_total_equity: Decimal | None = None
@@ -2889,10 +2892,35 @@ def rebuild_equity_history(
                 ticker = tx.ticker_symbol_normalized
                 shares = _to_decimal(tx.shares)
                 gross_base = _tx_base_amount(tx)
+                tx_currency = (tx.currency or base_currency).strip().upper() or base_currency
+                tx_fx = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
+                tx_local_notional = (shares * _to_decimal(tx.price)).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                 if tx.tx_type == "Buy":
                     cash -= gross_base
                     if cash_mode == "ignore_cash":
                         day_net_contribution += gross_base
+                    cycle = active_close_cycles.get(ticker)
+                    if cycle is None:
+                        cycle = {
+                            "open_date": d,
+                            "total_shares": Decimal("0"),
+                            "total_cost_basis": Decimal("0"),
+                            "total_proceeds": Decimal("0"),
+                            "buy_local_notional": Decimal("0"),
+                            "sell_local_notional": Decimal("0"),
+                            "total_dividends": Decimal("0"),
+                            "buy_fx_weighted_notional": Decimal("0"),
+                            "sell_fx_weighted_notional": Decimal("0"),
+                        }
+                        active_close_cycles[ticker] = cycle
+                    cycle["total_shares"] = (cycle["total_shares"] + shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+                    cycle["total_cost_basis"] = (cycle["total_cost_basis"] + gross_base).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+                    cycle["buy_local_notional"] = (cycle["buy_local_notional"] + tx_local_notional).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                    cycle["buy_fx_weighted_notional"] = (
+                        cycle["buy_fx_weighted_notional"] + (tx_local_notional * tx_fx)
+                    ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                     if shares > Decimal("0"):
                         lots[ticker].append((shares, (gross_base / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)))
                         if ticker in closed_tickers:
@@ -2915,16 +2943,92 @@ def rebuild_equity_history(
                             lots[ticker][0] = ((lot_shares - take).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP), lot_cost)
                         remaining = (remaining - take).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                     realized_total += (gross_base - consumed_cost).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+                    cycle = active_close_cycles.get(ticker)
+                    if cycle is None:
+                        # Defensive: should not happen because SELL inventory checks already passed.
+                        cycle = {
+                            "open_date": d,
+                            "total_shares": Decimal("0"),
+                            "total_cost_basis": Decimal("0"),
+                            "total_proceeds": Decimal("0"),
+                            "buy_local_notional": Decimal("0"),
+                            "sell_local_notional": Decimal("0"),
+                            "total_dividends": Decimal("0"),
+                            "buy_fx_weighted_notional": Decimal("0"),
+                            "sell_fx_weighted_notional": Decimal("0"),
+                        }
+                        active_close_cycles[ticker] = cycle
+                    cycle["total_proceeds"] = (cycle["total_proceeds"] + gross_base).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                    cycle["sell_local_notional"] = (cycle["sell_local_notional"] + tx_local_notional).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                    cycle["sell_fx_weighted_notional"] = (
+                        cycle["sell_fx_weighted_notional"] + (tx_local_notional * tx_fx)
+                    ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                     open_qty = sum((ls for ls, _ in lots[ticker]), Decimal("0")).quantize(
                         _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
                     )
                     if open_qty == Decimal("0"):
                         closed_tickers.add(ticker)
+                        total_cost_basis = _to_decimal(cycle["total_cost_basis"])
+                        total_proceeds = _to_decimal(cycle["total_proceeds"])
+                        realized_gain = (total_proceeds - total_cost_basis).quantize(
+                            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                        )
+                        realized_gain_pct = Decimal("0")
+                        if total_cost_basis != Decimal("0"):
+                            realized_gain_pct = ((realized_gain / total_cost_basis) * Decimal("100")).quantize(
+                                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                            )
+                        buy_local_notional = _to_decimal(cycle["buy_local_notional"])
+                        sell_local_notional = _to_decimal(cycle["sell_local_notional"])
+                        buy_fx_component = _to_decimal(cycle["buy_fx_weighted_notional"])
+                        sell_fx_component = _to_decimal(cycle["sell_fx_weighted_notional"])
+                        avg_buy_fx = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                        avg_sell_fx = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                        if buy_local_notional != Decimal("0"):
+                            avg_buy_fx = (buy_fx_component / buy_local_notional).quantize(
+                                _DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP
+                            )
+                        if sell_local_notional != Decimal("0"):
+                            avg_sell_fx = (sell_fx_component / sell_local_notional).quantize(
+                                _DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP
+                            )
+                        fx_component = (buy_local_notional * (avg_sell_fx - avg_buy_fx)).quantize(
+                            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                        )
+                        open_date = cycle["open_date"]
+                        holding_period_days = 0
+                        if isinstance(open_date, date):
+                            holding_period_days = max((d - open_date).days, 0)
+                        closed_rows_raw.append(
+                            {
+                                "ticker": ticker,
+                                "open_date": open_date if isinstance(open_date, date) else d,
+                                "close_date": d,
+                                "total_shares": _to_decimal(cycle["total_shares"]),
+                                "total_cost_basis": total_cost_basis,
+                                "total_proceeds": total_proceeds,
+                                "realized_gain": realized_gain,
+                                "realized_gain_pct": realized_gain_pct,
+                                "fx_component": fx_component,
+                                "total_dividends": _to_decimal(cycle["total_dividends"]),
+                                "holding_period_days": holding_period_days,
+                            }
+                        )
+                        active_close_cycles.pop(ticker, None)
                 elif tx.tx_type == "Dividend":
                     cash += gross_base
                     day_dividend_cash += gross_base
                     if not include_dividends_in_perf:
                         day_net_contribution += gross_base
+                    cycle = active_close_cycles.get(ticker)
+                    if cycle is not None:
+                        cycle["total_dividends"] = (cycle["total_dividends"] + gross_base).quantize(
+                            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                        )
 
             for action in action_by_date.get(d, []):
                 ticker = action.ticker
@@ -2954,6 +3058,11 @@ def rebuild_equity_history(
                     day_dividend_cash += amount
                     if not include_dividends_in_perf:
                         day_net_contribution += amount
+                    cycle = active_close_cycles.get(ticker)
+                    if cycle is not None:
+                        cycle["total_dividends"] = (cycle["total_dividends"] + amount).quantize(
+                            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                        )
 
             if d < start_date:
                 continue
@@ -3085,6 +3194,60 @@ def rebuild_equity_history(
                     input_hash=input_hash,
                     created_at=datetime.utcnow(),
                 )
+            )
+
+        closed_rows_merged: dict[tuple[str, date], dict[str, object]] = {}
+        for row in closed_rows_raw:
+            key = (str(row["ticker"]), row["close_date"])
+            existing = closed_rows_merged.get(key)
+            if existing is None:
+                closed_rows_merged[key] = row
+                continue
+            existing["open_date"] = min(existing["open_date"], row["open_date"])
+            for field in (
+                "total_shares",
+                "total_cost_basis",
+                "total_proceeds",
+                "realized_gain",
+                "fx_component",
+                "total_dividends",
+            ):
+                existing[field] = (_to_decimal(existing[field]) + _to_decimal(row[field])).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+            existing["realized_gain_pct"] = Decimal("0")
+            if _to_decimal(existing["total_cost_basis"]) != Decimal("0"):
+                existing["realized_gain_pct"] = (
+                    (_to_decimal(existing["realized_gain"]) / _to_decimal(existing["total_cost_basis"])) * Decimal("100")
+                ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            existing["holding_period_days"] = max(
+                (existing["close_date"] - existing["open_date"]).days,
+                int(existing["holding_period_days"]),
+                int(row["holding_period_days"]),
+            )
+
+        db.query(ClosedPosition).filter(ClosedPosition.portfolio_id == portfolio_id).delete(synchronize_session=False)
+        if closed_rows_merged:
+            db.add_all(
+                [
+                    ClosedPosition(
+                        id=str(uuid.uuid4()),
+                        portfolio_id=portfolio_id,
+                        ticker=str(row["ticker"]),
+                        open_date=row["open_date"],
+                        close_date=row["close_date"],
+                        total_shares=float(_to_decimal(row["total_shares"])),
+                        total_cost_basis=float(_to_decimal(row["total_cost_basis"])),
+                        total_proceeds=float(_to_decimal(row["total_proceeds"])),
+                        realized_gain=float(_to_decimal(row["realized_gain"])),
+                        realized_gain_pct=float(_to_decimal(row["realized_gain_pct"])),
+                        fx_component=float(_to_decimal(row["fx_component"])),
+                        total_dividends=float(_to_decimal(row["total_dividends"])),
+                        holding_period_days=int(row["holding_period_days"]),
+                        created_at=datetime.utcnow(),
+                    )
+                    for _, row in sorted(closed_rows_merged.items(), key=lambda item: (item[0][1], item[0][0]))
+                ]
             )
 
         if rows_to_add:
@@ -3323,6 +3486,34 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
             }
         )
     return {"portfolio_id": portfolio_id, "as_of": as_of.isoformat(), "holdings": rows}
+
+
+def list_closed_positions_for_portfolio(db: Session, portfolio_id: str) -> dict[str, object]:
+    get_portfolio_or_error(db, portfolio_id)
+    rows = (
+        db.query(ClosedPosition)
+        .filter(ClosedPosition.portfolio_id == portfolio_id)
+        .order_by(ClosedPosition.close_date.desc(), ClosedPosition.ticker.asc())
+        .all()
+    )
+    return {
+        "portfolio_id": portfolio_id,
+        "closed_positions": [
+            {
+                "ticker": r.ticker,
+                "open_date": r.open_date.isoformat() if r.open_date else None,
+                "close_date": r.close_date.isoformat(),
+                "total_cost_basis": float(r.total_cost_basis),
+                "total_proceeds": float(r.total_proceeds),
+                "realized_gain": float(r.realized_gain),
+                "realized_gain_pct": float(r.realized_gain_pct),
+                "fx_component": float(r.fx_component),
+                "total_dividends": float(r.total_dividends),
+                "holding_period_days": int(r.holding_period_days),
+            }
+            for r in rows
+        ],
+    }
 
 
 def get_open_tickers_for_portfolio(
