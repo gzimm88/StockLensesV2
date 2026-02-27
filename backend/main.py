@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from backend.database import Base, SessionLocal, engine, get_db
 from backend.models import (
+    ClosedPosition,
     FXRate,
     FinancialsHistory,
     LensPreset,
@@ -57,6 +58,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     get_latest_valuation_diff,
     get_or_create_default_portfolio,
     import_transactions_from_csv_for_portfolio,
+    list_closed_positions_for_portfolio,
     list_corporate_actions_for_portfolio,
     list_transactions_for_portfolio,
     list_portfolios,
@@ -349,6 +351,44 @@ def _ensure_phase12a_schema() -> None:
 
 
 _ensure_phase12a_schema()
+
+
+def _ensure_phase12b_schema() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS closed_positions (
+                    id VARCHAR PRIMARY KEY,
+                    portfolio_id VARCHAR NOT NULL,
+                    ticker VARCHAR NOT NULL,
+                    open_date DATE,
+                    close_date DATE NOT NULL,
+                    total_shares NUMERIC(24,10) NOT NULL,
+                    total_cost_basis NUMERIC(24,10) NOT NULL,
+                    total_proceeds NUMERIC(24,10) NOT NULL,
+                    realized_gain NUMERIC(24,10) NOT NULL,
+                    realized_gain_pct NUMERIC(24,10) NOT NULL,
+                    fx_component NUMERIC(24,10) NOT NULL,
+                    total_dividends NUMERIC(24,10) NOT NULL,
+                    holding_period_days INTEGER NOT NULL,
+                    created_at DATETIME,
+                    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_closed_positions_portfolio_ticker_close_date "
+                "ON closed_positions (portfolio_id, ticker, close_date)"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_closed_positions_ticker ON closed_positions (ticker)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_closed_positions_close_date ON closed_positions (close_date)"))
+
+
+_ensure_phase12b_schema()
 
 
 @app.on_event("startup")
@@ -815,6 +855,19 @@ def get_portfolio_holdings_route(portfolio_id: str, db: Session = Depends(get_db
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio holdings loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/closed-positions", response_model=PortfolioProcessResponse)
+def get_portfolio_closed_positions_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = list_closed_positions_for_portfolio(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio closed positions loaded",
         data=data,
     )
 

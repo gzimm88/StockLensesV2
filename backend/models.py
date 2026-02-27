@@ -558,3 +558,25 @@ class PortfolioSnapshot(Base):
     market_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
     fx_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ClosedPosition(Base):
+    __tablename__ = "closed_positions"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "ticker", "close_date", name="uq_closed_positions_portfolio_ticker_close_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(String, ForeignKey("portfolios.id"), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    open_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    close_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    total_shares: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    total_cost_basis: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    total_proceeds: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    realized_gain: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    realized_gain_pct: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    fx_component: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    total_dividends: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    holding_period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
