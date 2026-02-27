@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
 from backend.main import app
-from backend.models import Portfolio, PricesHistory
+from backend.models import Portfolio, PriceHistory, PricesHistory
 from backend.orchestrator.portfolio_orchestrator import (
     create_transaction,
     rebuild_equity_history,
@@ -55,20 +55,31 @@ def _seed_portfolio(db: Session, *, name: str = "DashboardParity") -> str:
 
 
 def _seed_price(db: Session, ticker: str, d: date, close: float) -> None:
-    db.add(
-        PricesHistory(
-            id=str(uuid.uuid4()),
-            ticker=ticker,
-            date=d,
-            close=close,
-            close_adj=close,
-            open=close,
-            high=close,
-            low=close,
-            volume=1000,
-            source="seed",
-            as_of_date=d,
-        )
+    db.add_all(
+        [
+            PriceHistory(
+                id=str(uuid.uuid4()),
+                ticker=ticker,
+                datetime_utc=datetime(d.year, d.month, d.day, 20, 0, 0),
+                price=close,
+                adjusted_price=None,
+                source="seed",
+                created_at=datetime.utcnow(),
+            ),
+            PricesHistory(
+                id=str(uuid.uuid4()),
+                ticker=ticker,
+                date=d,
+                close=close,
+                close_adj=close,
+                open=close,
+                high=close,
+                low=close,
+                volume=1000,
+                source="seed",
+                as_of_date=d,
+            ),
+        ]
     )
     db.commit()
 
