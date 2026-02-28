@@ -79,6 +79,14 @@ function fmtPercent(value, digits = 2) {
   return `${fmtNumber(value, digits)}%`;
 }
 
+function fmtDateTime(value) {
+  if (!value) return "-";
+  if (typeof value === "string" && value.toLowerCase().includes("no price data")) return "No price data";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString("en-US");
+}
+
 function fmtAxisNumber(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
   return Number(value).toLocaleString("en-US", {
@@ -745,7 +753,7 @@ export default function Portfolio() {
       {(result || metadata || transactions.length > 0) && (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 space-y-4">
           <div className="flex items-center gap-2">
-            {["summary", "attribution", "coverage", "corrections", "transactions", "closed"].map((tab) => (
+            {["summary", "attribution", "coverage", "corrections", "transactions"].map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -784,7 +792,11 @@ export default function Portfolio() {
                 </div>
                 <div><p className="text-slate-500">Market Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.market_move_component, displayCurrency)}</p></div>
                 <div><p className="text-slate-500">FX Impact</p><p className="font-medium">{fmtCurrency(dashboardSummary?.currency_move_component, displayCurrency)}</p></div>
-                <div><p className="text-slate-500">Realized Gain/Loss</p><p className="font-medium">{fmtCurrency(dashboardSummary?.realized_gain_value, displayCurrency)}</p></div>
+                <div>
+                  <p className="text-slate-500">Realized Gain/Loss</p>
+                  <p className="font-medium">{fmtCurrency(dashboardSummary?.realized_gain_value, displayCurrency)}</p>
+                  <p className="text-xs text-slate-500 mt-1">Last Prices Updated: {fmtDateTime(dashboardSummary?.last_prices_updated_at)}</p>
+                </div>
                 <div><p className="text-slate-500">Cash</p><p className="font-medium">{trackCashEnabled ? fmtCurrency(dashboardSummary?.cash_balance, displayCurrency) : "--"}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
               </div>
@@ -931,14 +943,14 @@ export default function Portfolio() {
                       <th className="text-left py-2 px-2">Status</th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("quantity")}>Shares {sortIndicator("quantity")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_price")}>Last Price {sortIndicator("market_price")}</button></th>
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("avg_cost_basis")}>AC/Share {sortIndicator("avg_cost_basis")}</button></th>
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost ({displayCurrency}) {sortIndicator("total_cost_basis")}</button></th>
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_value")}>Market Value ({displayCurrency}) {sortIndicator("market_value")}</button></th>
-                      <th className="text-left py-2 px-2">Tot Div Income ({displayCurrency})</th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("avg_cost_basis_native")}>AC/Share {sortIndicator("avg_cost_basis_native")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("total_cost_basis")}>Total Cost {sortIndicator("total_cost_basis")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_value")}>Market Value {sortIndicator("market_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("total_dividends")}>Tot Div Income ({displayCurrency}) {sortIndicator("total_dividends")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_percent")}>Day Gain UNRL (%) {sortIndicator("day_change_percent")}</button></th>
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain UNRL ({displayCurrency}) {sortIndicator("day_change_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("day_change_value")}>Day Gain UNRL {sortIndicator("day_change_value")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_percent")}>Tot Gain UNRL (%) {sortIndicator("unrealized_gain_percent")}</button></th>
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL ({displayCurrency}) {sortIndicator("unrealized_gain_value")}</button></th>
+                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("unrealized_gain_value")}>Tot Gain UNRL {sortIndicator("unrealized_gain_value")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_percent")}>Realized Gain (%) {sortIndicator("realized_gain_percent")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("realized_gain_value")}>Realized Gain ({displayCurrency}) {sortIndicator("realized_gain_value")}</button></th>
                     </tr>
@@ -953,10 +965,10 @@ export default function Portfolio() {
                           <td className="py-2 px-2">Open</td>
                           <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
                           <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis, displayCurrency)}</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis_native, row.native_currency || displayCurrency)}</td>
                           <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
                           <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
-                          <td className="py-2 px-2">--</td>
+                          <td className="py-2 px-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
                           <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtPercent(row.day_change_percent)}
                           </td>
@@ -981,6 +993,51 @@ export default function Portfolio() {
                   </tbody>
                 </table>
               </div>
+              <details className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
+                <summary className="cursor-pointer text-sm font-semibold">Closed Positions</summary>
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-2">Ticker</th>
+                        <th className="text-left py-2">Open date</th>
+                        <th className="text-left py-2">Close date</th>
+                        <th className="text-left py-2">Holding period</th>
+                        <th className="text-left py-2">Cost basis</th>
+                        <th className="text-left py-2">Proceeds</th>
+                        <th className="text-left py-2">Realized gain $</th>
+                        <th className="text-left py-2">Realized gain %</th>
+                        <th className="text-left py-2">FX component</th>
+                        <th className="text-left py-2">Dividends</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedClosedRows.length === 0 ? (
+                        <tr><td colSpan={10} className="py-3 text-slate-500">No closed positions.</td></tr>
+                      ) : sortedClosedRows.map((row) => (
+                        <tr key={`${row.ticker}-${row.close_date}`} className="border-b hover:bg-slate-50">
+                          <td className="py-2 font-mono">{row.ticker}</td>
+                          <td className="py-2">{row.open_date || "--"}</td>
+                          <td className="py-2">{row.close_date}</td>
+                          <td className="py-2">{row.holding_period_days}</td>
+                          <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.total_proceeds, displayCurrency)}</td>
+                          <td className={`py-2 ${Number(row.realized_gain || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.realized_gain, displayCurrency)}
+                          </td>
+                          <td className={`py-2 ${Number(row.realized_gain_pct || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtPercent(row.realized_gain_pct)}
+                          </td>
+                          <td className={`py-2 ${Number(row.fx_component || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                            {fmtCurrency(row.fx_component, displayCurrency)}
+                          </td>
+                          <td className="py-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
               <details>
                 <summary className="cursor-pointer text-base font-semibold">Processing Metadata</summary>
                 <div className="mt-3 grid md:grid-cols-2 gap-3 text-sm">
@@ -998,7 +1055,7 @@ export default function Portfolio() {
           )}
 
           {activeTab === "attribution" && (
-            <AttributionPanel attribution={valuationAttribution} diff={valuationDiff} />
+            <AttributionPanel attribution={valuationAttribution} diff={valuationDiff} performanceBreakdown={performanceBreakdown} />
           )}
 
           {activeTab === "coverage" && (
@@ -1076,58 +1133,6 @@ export default function Portfolio() {
             </div>
           )}
 
-          {activeTab === "closed" && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Closed Positions</h2>
-                <span className="text-xs text-slate-500">
-                  Sorted by {closedSortField.replaceAll("_", " ")} {closedSortDirection === "desc" ? "↓" : "↑"}
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("ticker")}>Ticker {closedSortIndicator("ticker")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("open_date")}>Open date {closedSortIndicator("open_date")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("close_date")}>Close date {closedSortIndicator("close_date")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("holding_period_days")}>Holding period {closedSortIndicator("holding_period_days")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_cost_basis")}>Cost basis {closedSortIndicator("total_cost_basis")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_proceeds")}>Proceeds {closedSortIndicator("total_proceeds")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("realized_gain")}>Realized gain $ {closedSortIndicator("realized_gain")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("realized_gain_pct")}>Realized gain % {closedSortIndicator("realized_gain_pct")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("fx_component")}>FX component {closedSortIndicator("fx_component")}</button></th>
-                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_dividends")}>Dividends {closedSortIndicator("total_dividends")}</button></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedClosedRows.length === 0 ? (
-                      <tr><td colSpan={10} className="py-3 text-slate-500">No closed positions.</td></tr>
-                    ) : sortedClosedRows.map((row) => (
-                      <tr key={`${row.ticker}-${row.close_date}`} className="border-b hover:bg-slate-50">
-                        <td className="py-2 font-mono">{row.ticker}</td>
-                        <td className="py-2">{row.open_date || "--"}</td>
-                        <td className="py-2">{row.close_date}</td>
-                        <td className="py-2">{row.holding_period_days}</td>
-                        <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
-                        <td className="py-2">{fmtCurrency(row.total_proceeds, displayCurrency)}</td>
-                        <td className={`py-2 ${Number(row.realized_gain || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
-                          {fmtCurrency(row.realized_gain, displayCurrency)}
-                        </td>
-                        <td className={`py-2 ${Number(row.realized_gain_pct || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
-                          {fmtPercent(row.realized_gain_pct)}
-                        </td>
-                        <td className={`py-2 ${Number(row.fx_component || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
-                          {fmtCurrency(row.fx_component, displayCurrency)}
-                        </td>
-                        <td className="py-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
       )}
 

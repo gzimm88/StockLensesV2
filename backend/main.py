@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from backend.database import Base, SessionLocal, engine, get_db
 from backend.models import (
     ClosedPosition,
+    DividendEvent,
     FXRate,
     FinancialsHistory,
     LensPreset,
@@ -35,6 +36,7 @@ from backend.models import (
     PricesHistory,
     ScoreSnapshot,
     Ticker,
+    TickerMetadata,
 )
 from backend.orchestrator.onboarding_orchestrator import (
     OnboardingResult,
@@ -47,6 +49,7 @@ from backend.orchestrator.onboarding_orchestrator import (
     ticker_is_onboarded,
 )
 from backend.orchestrator.portfolio_orchestrator import (
+    backfill_fx_history_if_missing,
     create_corporate_action,
     create_transaction,
     compute_performance_breakdown,
@@ -393,6 +396,67 @@ def _ensure_phase12b_schema() -> None:
 _ensure_phase12b_schema()
 
 
+def _ensure_phase13_schema() -> None:
+    with engine.begin() as conn:
+        tx_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolio_transactions)"))}
+        if tx_cols and "is_generated" not in tx_cols:
+            conn.execute(
+                text("ALTER TABLE portfolio_transactions ADD COLUMN is_generated BOOLEAN NOT NULL DEFAULT 0")
+            )
+        if tx_cols and "generated_event_id" not in tx_cols:
+            conn.execute(text("ALTER TABLE portfolio_transactions ADD COLUMN generated_event_id VARCHAR"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_portfolio_transactions_generated_event_id "
+                "ON portfolio_transactions (generated_event_id)"
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ticker_metadata (
+                    ticker_normalized VARCHAR PRIMARY KEY,
+                    exchange VARCHAR,
+                    native_currency VARCHAR NOT NULL,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS dividend_events (
+                    id VARCHAR PRIMARY KEY,
+                    ticker VARCHAR NOT NULL,
+                    ex_date DATE NOT NULL,
+                    pay_date DATE NOT NULL,
+                    amount_per_share NUMERIC(24,10) NOT NULL,
+                    currency VARCHAR NOT NULL,
+                    source VARCHAR,
+                    source_hash VARCHAR NOT NULL,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_dividend_events_source_hash "
+                "ON dividend_events (source_hash)"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dividend_events_ticker ON dividend_events (ticker)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dividend_events_ex_date ON dividend_events (ex_date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dividend_events_pay_date ON dividend_events (pay_date)"))
+
+
+_ensure_phase13_schema()
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
     start_market_data_scheduler()
@@ -643,6 +707,7 @@ def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(ge
             currency=payload.currency,
         )
         try:
+            backfill_fx_history_if_missing(payload.portfolio_id, db)
             rebuild_equity_history(
                 db,
                 payload.portfolio_id,
@@ -651,6 +716,7 @@ def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(ge
                 strict=None,
             )
         except PortfolioEngineError:
+            backfill_fx_history_if_missing(payload.portfolio_id, db)
             rebuild_equity_history(
                 db,
                 payload.portfolio_id,
@@ -677,6 +743,7 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
             currency=payload.currency,
         )
         try:
+            backfill_fx_history_if_missing(data["portfolio_id"], db)
             rebuild_equity_history(
                 db,
                 data["portfolio_id"],
@@ -685,6 +752,7 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
                 strict=None,
             )
         except PortfolioEngineError:
+            backfill_fx_history_if_missing(data["portfolio_id"], db)
             rebuild_equity_history(
                 db,
                 data["portfolio_id"],
@@ -722,6 +790,7 @@ def patch_transaction(transaction_id: str, payload: TransactionPatchRequest, db:
             trade_date=payload.date,
             currency=payload.currency,
         )
+        backfill_fx_history_if_missing(data["portfolio_id"], db)
         rebuild = rebuild_equity_history(
             db,
             data["portfolio_id"],
@@ -742,6 +811,7 @@ def patch_transaction(transaction_id: str, payload: TransactionPatchRequest, db:
 def delete_transaction(transaction_id: str, db: Session = Depends(get_db)):
     try:
         data = soft_delete_transaction(db, transaction_id)
+        backfill_fx_history_if_missing(data["portfolio_id"], db)
         rebuild = rebuild_equity_history(
             db,
             data["portfolio_id"],
@@ -981,6 +1051,7 @@ def post_rebuild_equity_history_for_portfolio(
     db: Session = Depends(get_db),
 ):
     try:
+        backfill_fx_history_if_missing(portfolio_id, db)
         data = rebuild_equity_history(
             db,
             portfolio_id,

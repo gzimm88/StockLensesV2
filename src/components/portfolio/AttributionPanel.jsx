@@ -11,7 +11,7 @@ function hasIntegrityFailure(unexplainedDelta) {
   return unexplainedDelta !== 0;
 }
 
-export default function AttributionPanel({ attribution, diff }) {
+export default function AttributionPanel({ attribution, diff, performanceBreakdown }) {
   const data = attribution || {};
   const breakdown = data?.breakdown_by_ticker || {};
   const rows = Object.entries(breakdown);
@@ -62,6 +62,24 @@ export default function AttributionPanel({ attribution, diff }) {
           <div>
             <p className="text-slate-500">Corporate action impact</p>
             <p className="font-medium">{fmt(data?.corporate_action_delta)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
+        <h3 className="text-sm font-semibold mb-2">Dividends</h3>
+        <div className="grid md:grid-cols-3 gap-2 text-sm">
+          <div>
+            <p className="text-slate-500">Total dividend gain</p>
+            <p className="font-medium">{fmt(performanceBreakdown?.dividend_gain ?? 0)}</p>
+          </div>
+          <div>
+            <p className="text-slate-500">Total gain (incl. dividends)</p>
+            <p className="font-medium">{fmt(performanceBreakdown?.total_gain)}</p>
+          </div>
+          <div>
+            <p className="text-slate-500">Total gain %</p>
+            <p className="font-medium">{fmt(performanceBreakdown?.total_gain_pct)}</p>
           </div>
         </div>
       </div>

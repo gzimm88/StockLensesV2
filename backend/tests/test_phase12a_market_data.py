@@ -145,7 +145,7 @@ def test_scheduler_fx_job_idempotent(monkeypatch):
         db.close()
 
 
-def test_equity_history_rebuild_uses_price_history_not_legacy_prices_history():
+def test_equity_history_rebuild_uses_deterministic_legacy_fallback_when_price_history_missing():
     db = _make_session()
     portfolio_id = create_portfolio(db, "P12A_EQ", "USD")["id"]
     tx_date = date(2026, 2, 1)
@@ -160,7 +160,7 @@ def test_equity_history_rebuild_uses_price_history_not_legacy_prices_history():
         currency="USD",
     )
 
-    # Only legacy table row -> rebuild should fail in strict mode
+    # Legacy table row should be accepted as deterministic fallback.
     db.add(
         PricesHistory(
             id="legacy-aapl-2026-02-01",
@@ -178,10 +178,10 @@ def test_equity_history_rebuild_uses_price_history_not_legacy_prices_history():
     )
     db.commit()
 
-    with pytest.raises(PortfolioEngineError, match="Missing required market inputs"):
-        rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+    out_legacy = rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+    assert out_legacy["rows_written"] >= 1
 
-    # Insert Phase12A row and rebuild succeeds
+    # Insert Phase12A row and rebuild still succeeds (primary source takes precedence).
     db.add(
         PriceHistory(
             id=str(uuid.uuid4()),
@@ -194,6 +194,6 @@ def test_equity_history_rebuild_uses_price_history_not_legacy_prices_history():
         )
     )
     db.commit()
-    out = rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
-    assert out["rows_written"] >= 1
+    out_primary = rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+    assert out_primary["rows_written"] >= 1
     db.close()

@@ -299,6 +299,8 @@ class PortfolioTransaction(Base):
     gross_amount: Mapped[float] = mapped_column(Float, nullable=False)
     fx_at_execution: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     gross_amount_base: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    generated_event_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     currency: Mapped[str] = mapped_column(String, nullable=False, default="USD")
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -539,6 +541,33 @@ class FXRate(Base):
     datetime_utc: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
     rate: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TickerMetadata(Base):
+    __tablename__ = "ticker_metadata"
+
+    ticker_normalized: Mapped[str] = mapped_column(String, primary_key=True)
+    exchange: Mapped[str | None] = mapped_column(String, nullable=True)
+    native_currency: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class DividendEvent(Base):
+    __tablename__ = "dividend_events"
+    __table_args__ = (
+        UniqueConstraint("source_hash", name="uq_dividend_events_source_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    ex_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    pay_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
+    amount_per_share: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    currency: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
 
 
