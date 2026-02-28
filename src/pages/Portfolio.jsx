@@ -21,6 +21,7 @@ import {
   getPortfolioDashboardSummary,
   getPortfolioEquityHistorySeries,
   getPortfolioHoldings,
+  getPerformanceBreakdown,
   getPortfolioSettings,
   getLastPortfolioRun,
   getValuationAttribution,
@@ -129,6 +130,7 @@ export default function Portfolio() {
   const [createCurrency, setCreateCurrency] = React.useState("USD");
   const [transactions, setTransactions] = React.useState([]);
   const [closedPositions, setClosedPositions] = React.useState([]);
+  const [performanceBreakdown, setPerformanceBreakdown] = React.useState(null);
   const [valuationAttribution, setValuationAttribution] = React.useState(null);
   const [valuationDiff, setValuationDiff] = React.useState(null);
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
@@ -267,6 +269,7 @@ export default function Portfolio() {
         setDashboardSummary(null);
         setHoldingsRows([]);
         setClosedPositions([]);
+        setPerformanceBreakdown(null);
         setEquitySeries([]);
         setPortfolioSettings(null);
         setEquityHistoryNotice("");
@@ -287,6 +290,7 @@ export default function Portfolio() {
         getPortfolioSettings(portfolioId),
         listPortfolioTransactions(portfolioId),
         getClosedPositions(portfolioId),
+        getPerformanceBreakdown(portfolioId),
       ]);
 
       const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
@@ -305,6 +309,7 @@ export default function Portfolio() {
       const settingsData = getSettledData(7);
       const transactionsData = getSettledData(8);
       const closedData = getSettledData(9);
+      const performanceData = getSettledData(10);
 
       const summaryErr = getSettledError(4);
       const historyErr = getSettledError(6);
@@ -319,6 +324,7 @@ export default function Portfolio() {
       const txs = transactionsData?.transactions || [];
       setTransactions(txs);
       setClosedPositions(closedData?.closed_positions || []);
+      setPerformanceBreakdown(performanceData || null);
       setEquitySeries(historyData?.series || []);
       setPortfolioSettings(settingsData);
       setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
@@ -341,6 +347,7 @@ export default function Portfolio() {
         getSettledError(7),
         getSettledError(8),
         getSettledError(9),
+        getSettledError(10),
       ].filter(Boolean);
       const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
       const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
@@ -381,6 +388,7 @@ export default function Portfolio() {
       setDashboardSummary(null);
       setHoldingsRows([]);
       setClosedPositions([]);
+      setPerformanceBreakdown(null);
       setEquitySeries([]);
       setPortfolioSettings(null);
       setEquityHistoryNotice("");
@@ -772,6 +780,20 @@ export default function Portfolio() {
                 <div><p className="text-slate-500">Cash</p><p className="font-medium">{trackCashEnabled ? fmtCurrency(dashboardSummary?.cash_balance, displayCurrency) : "--"}</p></div>
                 <div><p className="text-slate-500">Generated At</p><p className="font-medium">{result?.generated_at ?? "-"}</p></div>
               </div>
+
+              <details className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
+                <summary className="cursor-pointer text-sm font-semibold">Performance Breakdown</summary>
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex justify-between"><span>Realized</span><span className="font-medium">{fmtCurrency(performanceBreakdown?.realized_gain, displayCurrency)}</span></div>
+                  <div className="flex justify-between"><span>Unrealized</span><span className="font-medium">{fmtCurrency(performanceBreakdown?.unrealized_gain, displayCurrency)}</span></div>
+                  <div className="flex justify-between"><span>FX Impact</span><span className="font-medium">{fmtCurrency(performanceBreakdown?.fx_gain, displayCurrency)}</span></div>
+                  <div className="flex justify-between"><span>Dividends</span><span className="font-medium">{fmtCurrency(performanceBreakdown?.dividend_gain, displayCurrency)}</span></div>
+                  <div className="flex justify-between border-t pt-2">
+                    <span className="font-semibold">Total Gain</span>
+                    <span className="font-semibold">{fmtCurrency(performanceBreakdown?.total_gain, displayCurrency)} ({fmtPercent(performanceBreakdown?.total_gain_pct)})</span>
+                  </div>
+                </div>
+              </details>
 
               <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between mb-3">

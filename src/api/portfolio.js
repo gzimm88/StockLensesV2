@@ -259,3 +259,7 @@ export function deletePortfolioTransaction(portfolioId, transactionId) {
 export function getClosedPositions(portfolioId) {
   return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/closed-positions`, { method: "GET" });
 }
+
+export function getPerformanceBreakdown(portfolioId) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/performance-breakdown`, { method: "GET" });
+}
