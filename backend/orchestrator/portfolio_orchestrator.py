@@ -3721,6 +3721,56 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
     }
 
 
+def _compute_return_pct(
+    latest_value: Decimal,
+    baseline_value: Decimal,
+) -> float | None:
+    if baseline_value == Decimal("0"):
+        return None
+    return float(
+        (((latest_value - baseline_value) / baseline_value) * Decimal("100")).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+    )
+
+
+def compute_time_returns(db: Session, portfolio_id: str) -> dict[str, float | None]:
+    get_portfolio_or_error(db, portfolio_id)
+    rows = _resolve_latest_equity_rows(db, portfolio_id)
+    if not rows:
+        raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
+
+    latest = rows[-1]
+    latest_value = _to_decimal(latest.total_equity)
+
+    inception_row = rows[0]
+    inception_value = _to_decimal(inception_row.total_equity)
+    since_inception = _compute_return_pct(latest_value, inception_value)
+
+    ytd_start = date(latest.date.year, 1, 1)
+    ytd_row = next((r for r in rows if r.date >= ytd_start), None)
+    ytd_return = None
+    if ytd_row is not None:
+        ytd_return = _compute_return_pct(latest_value, _to_decimal(ytd_row.total_equity))
+
+    one_year_return = None
+    one_year_anchor = latest.date - timedelta(days=365)
+    if rows[0].date <= one_year_anchor:
+        one_year_row = None
+        for r in reversed(rows):
+            if r.date <= one_year_anchor:
+                one_year_row = r
+                break
+        if one_year_row is not None:
+            one_year_return = _compute_return_pct(latest_value, _to_decimal(one_year_row.total_equity))
+
+    return {
+        "since_inception_return_pct": since_inception,
+        "ytd_return_pct": ytd_return,
+        "one_year_return_pct": one_year_return,
+    }
+
+
 def get_open_tickers_for_portfolio(
     db: Session,
     portfolio_id: str,

@@ -22,6 +22,7 @@ import {
   getPortfolioEquityHistorySeries,
   getPortfolioHoldings,
   getPerformanceBreakdown,
+  getTimeReturns,
   getPortfolioSettings,
   getLastPortfolioRun,
   getValuationAttribution,
@@ -131,6 +132,7 @@ export default function Portfolio() {
   const [transactions, setTransactions] = React.useState([]);
   const [closedPositions, setClosedPositions] = React.useState([]);
   const [performanceBreakdown, setPerformanceBreakdown] = React.useState(null);
+  const [timeReturns, setTimeReturns] = React.useState(null);
   const [valuationAttribution, setValuationAttribution] = React.useState(null);
   const [valuationDiff, setValuationDiff] = React.useState(null);
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
@@ -270,6 +272,7 @@ export default function Portfolio() {
         setHoldingsRows([]);
         setClosedPositions([]);
         setPerformanceBreakdown(null);
+        setTimeReturns(null);
         setEquitySeries([]);
         setPortfolioSettings(null);
         setEquityHistoryNotice("");
@@ -291,6 +294,7 @@ export default function Portfolio() {
         listPortfolioTransactions(portfolioId),
         getClosedPositions(portfolioId),
         getPerformanceBreakdown(portfolioId),
+        getTimeReturns(portfolioId),
       ]);
 
       const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
@@ -310,6 +314,7 @@ export default function Portfolio() {
       const transactionsData = getSettledData(8);
       const closedData = getSettledData(9);
       const performanceData = getSettledData(10);
+      const timeReturnsData = getSettledData(11);
 
       const summaryErr = getSettledError(4);
       const historyErr = getSettledError(6);
@@ -325,6 +330,7 @@ export default function Portfolio() {
       setTransactions(txs);
       setClosedPositions(closedData?.closed_positions || []);
       setPerformanceBreakdown(performanceData || null);
+      setTimeReturns(timeReturnsData || null);
       setEquitySeries(historyData?.series || []);
       setPortfolioSettings(settingsData);
       setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
@@ -348,6 +354,7 @@ export default function Portfolio() {
         getSettledError(8),
         getSettledError(9),
         getSettledError(10),
+        getSettledError(11),
       ].filter(Boolean);
       const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
       const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
@@ -389,6 +396,7 @@ export default function Portfolio() {
       setHoldingsRows([]);
       setClosedPositions([]);
       setPerformanceBreakdown(null);
+      setTimeReturns(null);
       setEquitySeries([]);
       setPortfolioSettings(null);
       setEquityHistoryNotice("");
@@ -794,6 +802,24 @@ export default function Portfolio() {
                   </div>
                 </div>
               </details>
+
+              <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
+                <h3 className="text-sm font-semibold">Time Returns</h3>
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span>Since inception</span>
+                    <span className="font-medium">{fmtPercent(timeReturns?.since_inception_return_pct)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>YTD</span>
+                    <span className="font-medium">{fmtPercent(timeReturns?.ytd_return_pct)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>1Y</span>
+                    <span className="font-medium">{fmtPercent(timeReturns?.one_year_return_pct)}</span>
+                  </div>
+                </div>
+              </div>
 
               <div className="rounded-md border border-slate-200 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between mb-3">
