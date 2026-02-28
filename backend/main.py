@@ -50,6 +50,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
     compute_performance_breakdown,
+    compute_time_returns,
     create_portfolio,
     get_portfolio_dashboard_summary,
     get_portfolio_equity_history,
@@ -925,6 +926,19 @@ def get_portfolio_performance_breakdown_route(portfolio_id: str, db: Session = D
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio performance breakdown loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/time-returns", response_model=PortfolioProcessResponse)
+def get_portfolio_time_returns_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = compute_time_returns(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio time returns loaded",
         data=data,
     )
 

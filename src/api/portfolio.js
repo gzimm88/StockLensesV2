@@ -263,3 +263,7 @@ export function getClosedPositions(portfolioId) {
 export function getPerformanceBreakdown(portfolioId) {
   return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/performance-breakdown`, { method: "GET" });
 }
+
+export function getTimeReturns(portfolioId) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/time-returns`, { method: "GET" });
+}
