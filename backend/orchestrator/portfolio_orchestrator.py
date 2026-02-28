@@ -3516,6 +3516,211 @@ def list_closed_positions_for_portfolio(db: Session, portfolio_id: str) -> dict[
     }
 
 
+def _latest_price_on_or_before(
+    db: Session,
+    *,
+    ticker: str,
+    as_of_date: date,
+) -> Decimal | None:
+    row = (
+        db.query(PriceHistory)
+        .filter(
+            PriceHistory.ticker == ticker,
+            PriceHistory.datetime_utc <= datetime(as_of_date.year, as_of_date.month, as_of_date.day, 23, 59, 59),
+        )
+        .order_by(PriceHistory.datetime_utc.desc(), PriceHistory.id.desc())
+        .first()
+    )
+    if row is None or row.price is None:
+        return None
+    return _to_decimal(row.price)
+
+
+def _latest_fx_rate_on_or_before(
+    db: Session,
+    *,
+    base_currency: str,
+    quote_currency: str,
+    as_of_date: date,
+) -> Decimal | None:
+    base = (base_currency or "").strip().upper()
+    quote = (quote_currency or "").strip().upper()
+    if base == quote:
+        return Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+    row = (
+        db.query(FXRate)
+        .filter(
+            FXRate.base_currency == base,
+            FXRate.quote_currency == quote,
+            FXRate.datetime_utc <= datetime(as_of_date.year, as_of_date.month, as_of_date.day, 23, 59, 59),
+        )
+        .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+        .first()
+    )
+    if row is None or row.rate is None:
+        return None
+    return _to_decimal(row.rate, scale=_DECIMAL_RATE_SCALE)
+
+
+def _open_lot_basis_details_upto(
+    db: Session,
+    portfolio_id: str,
+    *,
+    as_of_date: date,
+) -> dict[str, dict[str, Decimal]]:
+    tx_rows = _sorted_active_transactions_for_window(db, portfolio_id, to_date=as_of_date)
+    lots: dict[str, list[tuple[Decimal, Decimal, Decimal]]] = defaultdict(list)  # shares, local_unit_px, base_unit_px
+    for tx in tx_rows:
+        ticker = tx.ticker_symbol_normalized
+        shares = _to_decimal(tx.shares)
+        if tx.tx_type == "Buy":
+            if shares <= Decimal("0"):
+                continue
+            local_unit = _to_decimal(tx.price)
+            base_unit = (_tx_base_amount(tx) / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            lots[ticker].append((shares, local_unit, base_unit))
+        elif tx.tx_type == "Sell":
+            remaining = shares
+            while remaining > Decimal("0"):
+                if not lots[ticker]:
+                    raise PortfolioEngineError(f"Negative holdings detected for {ticker}.")
+                lot_shares, lot_local_unit, lot_base_unit = lots[ticker][0]
+                take = lot_shares if lot_shares <= remaining else remaining
+                if take == lot_shares:
+                    lots[ticker].pop(0)
+                else:
+                    lots[ticker][0] = (
+                        (lot_shares - take).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP),
+                        lot_local_unit,
+                        lot_base_unit,
+                    )
+                remaining = (remaining - take).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    out: dict[str, dict[str, Decimal]] = {}
+    for ticker, lot_rows in lots.items():
+        open_local_cost = Decimal("0")
+        open_base_cost = Decimal("0")
+        open_qty = Decimal("0")
+        for shares, local_unit, base_unit in lot_rows:
+            open_qty += shares
+            open_local_cost += (shares * local_unit).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            open_base_cost += (shares * base_unit).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        out[ticker] = {
+            "open_qty": open_qty.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP),
+            "open_local_cost": open_local_cost.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP),
+            "open_base_cost": open_base_cost.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP),
+        }
+    return out
+
+
+def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, float]:
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    latest_row = _latest_equity_row_or_none(db, portfolio_id)
+    if latest_row is None:
+        raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
+    as_of = latest_row.date
+    base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+
+    realized_gain = (
+        db.query(ClosedPosition)
+        .filter(ClosedPosition.portfolio_id == portfolio_id)
+        .with_entities(ClosedPosition.realized_gain)
+        .all()
+    )
+    realized_total = sum((_to_decimal(r[0]) for r in realized_gain), Decimal("0")).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    )
+
+    fx_rows = (
+        db.query(ClosedPosition)
+        .filter(ClosedPosition.portfolio_id == portfolio_id)
+        .with_entities(ClosedPosition.fx_component)
+        .all()
+    )
+    closed_fx_total = sum((_to_decimal(r[0]) for r in fx_rows), Decimal("0")).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    )
+
+    dividend_rows = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+            PortfolioTransaction.tx_type == "Dividend",
+            PortfolioTransaction.trade_date <= as_of,
+        )
+        .all()
+    )
+    dividend_total = sum((_tx_base_amount(tx) for tx in dividend_rows), Decimal("0")).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    )
+
+    invested_rows = (
+        db.query(PortfolioTransaction)
+        .filter(
+            PortfolioTransaction.portfolio_id == portfolio_id,
+            PortfolioTransaction.is_deleted == False,
+            PortfolioTransaction.tx_type == "Buy",
+            PortfolioTransaction.trade_date <= as_of,
+        )
+        .all()
+    )
+    invested_capital = sum((_tx_base_amount(tx) for tx in invested_rows), Decimal("0")).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    )
+
+    holdings_state = _compute_holdings_state_upto(db, portfolio_id, as_of_date=as_of)
+    lot_basis = _open_lot_basis_details_upto(db, portfolio_id, as_of_date=as_of)
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
+
+    unrealized_total = Decimal("0")
+    open_fx_total = Decimal("0")
+    for ticker, state in holdings_state.items():
+        qty = _to_decimal(state.get("quantity"))
+        if qty <= Decimal("0"):
+            continue
+        px = _latest_price_on_or_before(db, ticker=ticker, as_of_date=as_of)
+        if px is None:
+            raise PortfolioEngineError(f"Missing required market inputs on {as_of.isoformat()}: price:{ticker}")
+        ccy = (ticker_currency.get(ticker) or base_currency).strip().upper()
+        fx = _latest_fx_rate_on_or_before(db, base_currency=base_currency, quote_currency=ccy, as_of_date=as_of)
+        if fx is None:
+            raise PortfolioEngineError(f"Missing required market inputs on {as_of.isoformat()}: fx:{ccy}")
+        market_value_base = (qty * px * fx).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        cost_basis_base = _to_decimal(state.get("total_cost_basis"))
+        unrealized_total += (market_value_base - cost_basis_base).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+        basis_row = lot_basis.get(ticker, {})
+        open_local_cost = _to_decimal(basis_row.get("open_local_cost"))
+        open_base_cost = _to_decimal(basis_row.get("open_base_cost"))
+        avg_exec_fx = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+        if ccy != base_currency and open_local_cost != Decimal("0"):
+            avg_exec_fx = (open_base_cost / open_local_cost).quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+            current_local_value = (qty * px).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            open_fx_total += (current_local_value * (fx - avg_exec_fx)).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+
+    unrealized_total = unrealized_total.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    fx_total = (closed_fx_total + open_fx_total).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    total_gain = (realized_total + unrealized_total + dividend_total).quantize(
+        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+    )
+    total_gain_pct = Decimal("0")
+    if invested_capital != Decimal("0"):
+        total_gain_pct = ((total_gain / invested_capital) * Decimal("100")).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+    return {
+        "realized_gain": float(realized_total),
+        "unrealized_gain": float(unrealized_total),
+        "fx_gain": float(fx_total),
+        "dividend_gain": float(dividend_total),
+        "total_gain": float(total_gain),
+        "total_gain_pct": float(total_gain_pct),
+    }
+
+
 def get_open_tickers_for_portfolio(
     db: Session,
     portfolio_id: str,

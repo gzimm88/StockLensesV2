@@ -49,6 +49,7 @@ from backend.orchestrator.onboarding_orchestrator import (
 from backend.orchestrator.portfolio_orchestrator import (
     create_corporate_action,
     create_transaction,
+    compute_performance_breakdown,
     create_portfolio,
     get_portfolio_dashboard_summary,
     get_portfolio_equity_history,
@@ -911,6 +912,19 @@ def get_portfolio_closed_positions_route(portfolio_id: str, db: Session = Depend
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio closed positions loaded",
+        data=data,
+    )
+
+
+@app.get("/portfolio/{portfolio_id}/performance-breakdown", response_model=PortfolioProcessResponse)
+def get_portfolio_performance_breakdown_route(portfolio_id: str, db: Session = Depends(get_db)):
+    try:
+        data = compute_performance_breakdown(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio performance breakdown loaded",
         data=data,
     )
 
