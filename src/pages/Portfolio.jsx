@@ -17,6 +17,7 @@ import {
   createPortfolio,
   createPortfolioTransaction,
   deletePortfolioTransaction,
+  getClosedPositions,
   getPortfolioDashboardSummary,
   getPortfolioEquityHistorySeries,
   getPortfolioHoldings,
@@ -127,6 +128,7 @@ export default function Portfolio() {
   const [createName, setCreateName] = React.useState("");
   const [createCurrency, setCreateCurrency] = React.useState("USD");
   const [transactions, setTransactions] = React.useState([]);
+  const [closedPositions, setClosedPositions] = React.useState([]);
   const [valuationAttribution, setValuationAttribution] = React.useState(null);
   const [valuationDiff, setValuationDiff] = React.useState(null);
   const [dashboardSummary, setDashboardSummary] = React.useState(null);
@@ -140,11 +142,15 @@ export default function Portfolio() {
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [txDirty, setTxDirty] = React.useState(false);
   const [showTxModal, setShowTxModal] = React.useState(false);
+  const [isSavingTx, setIsSavingTx] = React.useState(false);
+  const [deletingTxId, setDeletingTxId] = React.useState(null);
   const [txForm, setTxForm] = React.useState(EMPTY_TX);
   const [editTxId, setEditTxId] = React.useState(null);
   const [knownTickers, setKnownTickers] = React.useState([]);
   const [holdingsSortField, setHoldingsSortField] = React.useState("market_value");
   const [holdingsSortDirection, setHoldingsSortDirection] = React.useState("desc");
+  const [closedSortField, setClosedSortField] = React.useState("close_date");
+  const [closedSortDirection, setClosedSortDirection] = React.useState("desc");
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
   const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
@@ -174,6 +180,23 @@ export default function Portfolio() {
     return rows;
   }, [holdingsRows, holdingsSortDirection, holdingsSortField]);
 
+  const sortedClosedRows = React.useMemo(() => {
+    const rows = [...closedPositions];
+    const dir = closedSortDirection === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      const av = a?.[closedSortField];
+      const bv = b?.[closedSortField];
+      const ad = Date.parse(`${av || ""}`);
+      const bd = Date.parse(`${bv || ""}`);
+      if (!Number.isNaN(ad) && !Number.isNaN(bd)) return (ad - bd) * dir;
+      const an = typeof av === "number" ? av : Number(av);
+      const bn = typeof bv === "number" ? bv : Number(bv);
+      if (!Number.isNaN(an) && !Number.isNaN(bn)) return (an - bn) * dir;
+      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+    });
+    return rows;
+  }, [closedPositions, closedSortField, closedSortDirection]);
+
   const toggleHoldingsSort = (field) => {
     if (holdingsSortField === field) {
       setHoldingsSortDirection((p) => (p === "asc" ? "desc" : "asc"));
@@ -186,6 +209,20 @@ export default function Portfolio() {
   const sortIndicator = (field) => {
     if (holdingsSortField !== field) return "";
     return holdingsSortDirection === "desc" ? "▾" : "▴";
+  };
+
+  const toggleClosedSort = (field) => {
+    if (closedSortField === field) {
+      setClosedSortDirection((p) => (p === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setClosedSortField(field);
+    setClosedSortDirection("desc");
+  };
+
+  const closedSortIndicator = (field) => {
+    if (closedSortField !== field) return "";
+    return closedSortDirection === "desc" ? "▾" : "▴";
   };
 
   const loadPortfolios = React.useCallback(async () => {
@@ -229,6 +266,7 @@ export default function Portfolio() {
         setValuationDiff(null);
         setDashboardSummary(null);
         setHoldingsRows([]);
+        setClosedPositions([]);
         setEquitySeries([]);
         setPortfolioSettings(null);
         setEquityHistoryNotice("");
@@ -247,6 +285,8 @@ export default function Portfolio() {
           showFxImpact: false,
         }),
         getPortfolioSettings(portfolioId),
+        listPortfolioTransactions(portfolioId),
+        getClosedPositions(portfolioId),
       ]);
 
       const getSettledData = (idx) => (settled[idx]?.status === "fulfilled" ? settled[idx].value?.data || null : null);
@@ -263,6 +303,8 @@ export default function Portfolio() {
       const holdingsData = getSettledData(5);
       const historyData = getSettledData(6);
       const settingsData = getSettledData(7);
+      const transactionsData = getSettledData(8);
+      const closedData = getSettledData(9);
 
       const summaryErr = getSettledError(4);
       const historyErr = getSettledError(6);
@@ -274,9 +316,21 @@ export default function Portfolio() {
       setValuationDiff(diffData);
       setDashboardSummary(summaryData);
       setHoldingsRows(holdingsData?.holdings || []);
+      const txs = transactionsData?.transactions || [];
+      setTransactions(txs);
+      setClosedPositions(closedData?.closed_positions || []);
       setEquitySeries(historyData?.series || []);
       setPortfolioSettings(settingsData);
       setEquityHistoryNotice(missingHistory ? "Equity history not built yet." : "");
+
+      const lastRunFinishedAt = metaData?.finished_at || null;
+      if (!lastRunFinishedAt) {
+        setTxDirty(txs.length > 0);
+      } else {
+        const lastRunMs = Date.parse(lastRunFinishedAt.replace("Z", ""));
+        const changed = txs.some((tx) => !tx.updated_at || Date.parse(tx.updated_at.replace("Z", "")) > lastRunMs);
+        setTxDirty(changed);
+      }
 
       const nonHistoryErrors = [
         getSettledError(0),
@@ -285,16 +339,16 @@ export default function Portfolio() {
         getSettledError(3),
         getSettledError(5),
         getSettledError(7),
+        getSettledError(8),
+        getSettledError(9),
       ].filter(Boolean);
       const relevantSummaryErrors = [summaryErr, historyErr].filter((msg) => msg && !isMissingHistoryErr(msg));
       const combinedErrors = [...nonHistoryErrors, ...relevantSummaryErrors];
       if (combinedErrors.length > 0) {
         setError(combinedErrors[0]);
       }
-
-      await loadTransactions(portfolioId, metaData?.finished_at || null);
     },
-    [loadTransactions, equityRange, equityPerformanceMode]
+    [equityRange, equityPerformanceMode]
   );
 
   React.useEffect(() => {
@@ -326,6 +380,7 @@ export default function Portfolio() {
       setValuationDiff(null);
       setDashboardSummary(null);
       setHoldingsRows([]);
+      setClosedPositions([]);
       setEquitySeries([]);
       setPortfolioSettings(null);
       setEquityHistoryNotice("");
@@ -455,41 +510,47 @@ export default function Portfolio() {
   const saveTx = async () => {
     if (!selectedPortfolioId) return;
     setError("");
+    setIsSavingTx(true);
     const payload = {
-      ticker: txForm.ticker,
-      type: txForm.type,
       trade_date: txForm.trade_date,
-      shares: txForm.type === "Dividend" && txForm.shares === "" ? null : Number(txForm.shares),
+      shares: Number(txForm.shares),
       price: Number(txForm.price),
       currency: txForm.currency,
-      note: txForm.note || null,
     };
     try {
       if (editTxId) {
         await updatePortfolioTransaction(selectedPortfolioId, editTxId, payload);
       } else {
-        await createPortfolioTransaction(selectedPortfolioId, payload);
+        await createPortfolioTransaction(selectedPortfolioId, {
+          ...payload,
+          ticker: txForm.ticker,
+          type: txForm.type,
+          note: txForm.note || null,
+        });
       }
       setShowTxModal(false);
       setTxForm(EMPTY_TX);
       setEditTxId(null);
-      await loadTransactions(selectedPortfolioId, metadata?.finished_at || null);
-      setTxDirty(true);
+      await loadPortfolioState(selectedPortfolioId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save transaction.");
+    } finally {
+      setIsSavingTx(false);
     }
   };
 
   const deleteTx = async (txId) => {
     if (!selectedPortfolioId) return;
-    if (!window.confirm("Delete this transaction? This action is soft-delete and will require rebuild.")) return;
+    if (!window.confirm("Delete this transaction? This will trigger deterministic rebuild.")) return;
     setError("");
+    setDeletingTxId(txId);
     try {
       await deletePortfolioTransaction(selectedPortfolioId, txId);
-      await loadTransactions(selectedPortfolioId, metadata?.finished_at || null);
-      setTxDirty(true);
+      await loadPortfolioState(selectedPortfolioId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete transaction.");
+    } finally {
+      setDeletingTxId(null);
     }
   };
 
@@ -668,7 +729,7 @@ export default function Portfolio() {
       {(result || metadata || transactions.length > 0) && (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 space-y-4">
           <div className="flex items-center gap-2">
-            {["summary", "attribution", "coverage", "corrections", "transactions"].map((tab) => (
+            {["summary", "attribution", "coverage", "corrections", "transactions", "closed"].map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -954,9 +1015,64 @@ export default function Portfolio() {
                         <td className="py-2">
                           <div className="flex gap-2">
                             <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>
-                            <Button size="sm" variant="outline" onClick={() => deleteTx(tx.id)}>Delete</Button>
+                            <Button size="sm" variant="outline" onClick={() => deleteTx(tx.id)} disabled={deletingTxId === tx.id}>
+                              {deletingTxId === tx.id ? "Deleting..." : "Delete"}
+                            </Button>
                           </div>
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "closed" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Closed Positions</h2>
+                <span className="text-xs text-slate-500">
+                  Sorted by {closedSortField.replaceAll("_", " ")} {closedSortDirection === "desc" ? "↓" : "↑"}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("ticker")}>Ticker {closedSortIndicator("ticker")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("open_date")}>Open date {closedSortIndicator("open_date")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("close_date")}>Close date {closedSortIndicator("close_date")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("holding_period_days")}>Holding period {closedSortIndicator("holding_period_days")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_cost_basis")}>Cost basis {closedSortIndicator("total_cost_basis")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_proceeds")}>Proceeds {closedSortIndicator("total_proceeds")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("realized_gain")}>Realized gain $ {closedSortIndicator("realized_gain")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("realized_gain_pct")}>Realized gain % {closedSortIndicator("realized_gain_pct")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("fx_component")}>FX component {closedSortIndicator("fx_component")}</button></th>
+                      <th className="text-left py-2"><button onClick={() => toggleClosedSort("total_dividends")}>Dividends {closedSortIndicator("total_dividends")}</button></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedClosedRows.length === 0 ? (
+                      <tr><td colSpan={10} className="py-3 text-slate-500">No closed positions.</td></tr>
+                    ) : sortedClosedRows.map((row) => (
+                      <tr key={`${row.ticker}-${row.close_date}`} className="border-b hover:bg-slate-50">
+                        <td className="py-2 font-mono">{row.ticker}</td>
+                        <td className="py-2">{row.open_date || "--"}</td>
+                        <td className="py-2">{row.close_date}</td>
+                        <td className="py-2">{row.holding_period_days}</td>
+                        <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                        <td className="py-2">{fmtCurrency(row.total_proceeds, displayCurrency)}</td>
+                        <td className={`py-2 ${Number(row.realized_gain || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                          {fmtCurrency(row.realized_gain, displayCurrency)}
+                        </td>
+                        <td className={`py-2 ${Number(row.realized_gain_pct || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                          {fmtPercent(row.realized_gain_pct)}
+                        </td>
+                        <td className={`py-2 ${Number(row.fx_component || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                          {fmtCurrency(row.fx_component, displayCurrency)}
+                        </td>
+                        <td className="py-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -974,20 +1090,28 @@ export default function Portfolio() {
             <div className="grid md:grid-cols-2 gap-2">
               <div>
                 <label className="text-sm">Ticker</label>
-                <input list="ticker-options" value={txForm.ticker} onChange={(e) => setTxForm((p) => ({ ...p, ticker: e.target.value }))} className="w-full border rounded px-2 py-1" />
+                <input
+                  list="ticker-options"
+                  value={txForm.ticker}
+                  onChange={(e) => setTxForm((p) => ({ ...p, ticker: e.target.value }))}
+                  className="w-full border rounded px-2 py-1"
+                  disabled={Boolean(editTxId)}
+                />
                 <datalist id="ticker-options">
                   {[...new Set([...knownTickers, ...transactions.map((t) => t.ticker)])].map((sym) => (
                     <option key={sym} value={sym} />
                   ))}
                 </datalist>
+                {editTxId && <p className="text-xs text-slate-500 mt-1">Ticker cannot be edited.</p>}
               </div>
               <div>
                 <label className="text-sm">Type</label>
-                <select value={txForm.type} onChange={(e) => setTxForm((p) => ({ ...p, type: e.target.value }))} className="w-full border rounded px-2 py-1">
+                <select value={txForm.type} onChange={(e) => setTxForm((p) => ({ ...p, type: e.target.value }))} className="w-full border rounded px-2 py-1" disabled={Boolean(editTxId)}>
                   <option>Buy</option>
                   <option>Sell</option>
                   <option>Dividend</option>
                 </select>
+                {editTxId && <p className="text-xs text-slate-500 mt-1">Transaction type cannot be edited.</p>}
               </div>
               <div>
                 <label className="text-sm">Date</label>
@@ -1011,8 +1135,8 @@ export default function Portfolio() {
               </div>
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowTxModal(false)}>Cancel</Button>
-              <Button onClick={saveTx}>Save</Button>
+              <Button variant="outline" onClick={() => setShowTxModal(false)} disabled={isSavingTx}>Cancel</Button>
+              <Button onClick={saveTx} disabled={isSavingTx}>{isSavingTx ? "Saving..." : "Save"}</Button>
             </div>
           </div>
         </div>

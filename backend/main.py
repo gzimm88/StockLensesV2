@@ -495,6 +495,13 @@ class TransactionUpdateRequest(BaseModel):
     currency: str = "USD"
 
 
+class TransactionPatchRequest(BaseModel):
+    quantity: float
+    price: float
+    date: date
+    currency: str = "USD"
+
+
 class CorporateActionCreateRequest(BaseModel):
     portfolio_id: str
     ticker: str
@@ -688,29 +695,65 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
     return PortfolioProcessResponse(ok=True, message="Transaction updated", data=data)
 
 
+@app.patch("/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
+def patch_transaction(transaction_id: str, payload: TransactionPatchRequest, db: Session = Depends(get_db)):
+    try:
+        original = (
+            db.query(PortfolioTransaction)
+            .filter(PortfolioTransaction.id == transaction_id, PortfolioTransaction.is_deleted == False)
+            .first()
+        )
+        if not original:
+            raise PortfolioEngineError(f"Transaction '{transaction_id}' not found.")
+        if float(payload.quantity) <= 0:
+            raise PortfolioEngineError("Quantity must be positive.")
+        if float(payload.price) <= 0:
+            raise PortfolioEngineError("Price must be positive.")
+
+        data = update_transaction(
+            db,
+            transaction_id=transaction_id,
+            ticker=original.ticker_symbol_raw,
+            tx_type=original.tx_type,
+            quantity=payload.quantity,
+            price=payload.price,
+            trade_date=payload.date,
+            currency=payload.currency,
+        )
+        rebuild = rebuild_equity_history(
+            db,
+            data["portfolio_id"],
+            mode="full",
+            force=True,
+            strict=None,
+        )
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Transaction patched",
+        data={"transaction": data, "rebuild": rebuild},
+    )
+
+
 @app.delete("/transactions/{transaction_id}", response_model=PortfolioProcessResponse)
 def delete_transaction(transaction_id: str, db: Session = Depends(get_db)):
     try:
         data = soft_delete_transaction(db, transaction_id)
-        try:
-            rebuild_equity_history(
-                db,
-                data["portfolio_id"],
-                mode="incremental",
-                force=False,
-                strict=None,
-            )
-        except PortfolioEngineError:
-            rebuild_equity_history(
-                db,
-                data["portfolio_id"],
-                mode="full",
-                force=True,
-                strict=None,
-            )
+        rebuild = rebuild_equity_history(
+            db,
+            data["portfolio_id"],
+            mode="full",
+            force=True,
+            strict=None,
+        )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return PortfolioProcessResponse(ok=True, message="Transaction soft-deleted", data=data)
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Transaction deleted",
+        data={"success": True, "deleted": data, "rebuild": rebuild},
+    )
 
 
 @app.get("/portfolios/{portfolio_id}/transactions", response_model=PortfolioProcessResponse)
