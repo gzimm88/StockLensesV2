@@ -318,3 +318,69 @@ def test_reprocess_determinism_for_same_transactions(monkeypatch):
     assert first_data["irr"] == second_data["irr"]
     assert first_data["input_hash"] == second_data["input_hash"]
     app.dependency_overrides.clear()
+
+
+def test_patch_transaction_updates_and_forces_full_rebuild():
+    client, SessionLocal = _build_client()
+    portfolio_id = _create_portfolio_id(SessionLocal, name="Phase12C_Patch")
+
+    created = client.post(
+        "/transactions",
+        json={
+            "portfolio_id": portfolio_id,
+            "ticker": "AAPL",
+            "type": "BUY",
+            "quantity": 10,
+            "price": 100,
+            "date": "2026-02-01",
+            "currency": "USD",
+        },
+    )
+    assert created.status_code == 200
+    tx_id = created.json()["data"]["id"]
+
+    patched = client.patch(
+        f"/transactions/{tx_id}",
+        json={
+            "quantity": 8,
+            "price": 105,
+            "date": "2026-02-02",
+            "currency": "USD",
+        },
+    )
+    assert patched.status_code == 200
+    payload = patched.json()["data"]
+    assert payload["transaction"]["quantity"] == 8
+    assert payload["transaction"]["price"] == 105
+    assert payload["rebuild"]["mode"] == "full"
+    assert payload["rebuild"]["forced"] is True
+    app.dependency_overrides.clear()
+
+
+def test_delete_transaction_triggers_rebuild_and_returns_success():
+    client, SessionLocal = _build_client()
+    portfolio_id = _create_portfolio_id(SessionLocal, name="Phase12C_Delete")
+
+    created = client.post(
+        "/transactions",
+        json={
+            "portfolio_id": portfolio_id,
+            "ticker": "AAPL",
+            "type": "BUY",
+            "quantity": 10,
+            "price": 100,
+            "date": "2026-02-01",
+            "currency": "USD",
+        },
+    )
+    assert created.status_code == 200
+    tx_id = created.json()["data"]["id"]
+
+    deleted = client.delete(f"/transactions/{tx_id}")
+    assert deleted.status_code == 200
+    payload = deleted.json()["data"]
+    assert payload["success"] is True
+    assert payload["deleted"]["id"] == tx_id
+    assert payload["rebuild"]["mode"] == "full"
+    assert payload["rebuild"]["forced"] is True
+    app.dependency_overrides.clear()

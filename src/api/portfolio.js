@@ -220,30 +220,25 @@ export function createPortfolioTransaction(portfolioId, payload) {
 
 export function updatePortfolioTransaction(portfolioId, transactionId, payload) {
   const legacyPayload = {
-    ticker: payload.ticker,
-    type: payload.type,
     trade_date: payload.trade_date,
     shares: payload.shares,
     price: payload.price,
     currency: payload.currency,
-    note: payload.note ?? null,
   };
   const newPayload = {
-    ticker: payload.ticker,
-    type: payload.type,
     quantity: payload.shares,
     price: payload.price,
     date: payload.trade_date,
     currency: payload.currency,
   };
   return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions/${encodeURIComponent(transactionId)}`, {
-    method: "PUT",
+    method: "PATCH",
     body: JSON.stringify(legacyPayload),
   }).catch(async (err) => {
     const msg = String(err?.message || "");
     if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
     return apiFetch(`/transactions/${encodeURIComponent(transactionId)}`, {
-      method: "PUT",
+      method: "PATCH",
       body: JSON.stringify(newPayload),
     });
   });
@@ -259,4 +254,8 @@ export function deletePortfolioTransaction(portfolioId, transactionId) {
       method: "DELETE",
     });
   });
+}
+
+export function getClosedPositions(portfolioId) {
+  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/closed-positions`, { method: "GET" });
 }

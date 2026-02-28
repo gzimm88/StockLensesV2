@@ -324,3 +324,90 @@ def test_closed_positions_endpoint_returns_rows():
     finally:
         db.close()
         app.dependency_overrides.clear()
+
+
+def test_patch_edit_closed_position_updates_row_values():
+    client, SessionLocal = _build_client()
+    db: Session = SessionLocal()
+    try:
+        portfolio_id = _seed_portfolio(db, name="ClosedPatchUpdate")
+        d0 = date.today() - timedelta(days=3)
+        d1 = date.today() - timedelta(days=2)
+        buy = create_transaction(
+            db,
+            portfolio_id=portfolio_id,
+            ticker="AAPL",
+            tx_type="BUY",
+            quantity=10,
+            price=100,
+            trade_date=d0,
+            currency="USD",
+        )
+        sell = create_transaction(
+            db,
+            portfolio_id=portfolio_id,
+            ticker="AAPL",
+            tx_type="SELL",
+            quantity=10,
+            price=110,
+            trade_date=d1,
+            currency="USD",
+        )
+        _seed_price(db, "AAPL", d0, 100)
+        rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+        before = db.query(ClosedPosition).filter(ClosedPosition.portfolio_id == portfolio_id).one()
+        assert float(before.realized_gain) == 100.0
+
+        patched = client.patch(
+            f"/transactions/{sell['id']}",
+            json={"quantity": 10, "price": 130, "date": d1.isoformat(), "currency": "USD"},
+        )
+        assert patched.status_code == 200
+        after = db.query(ClosedPosition).filter(ClosedPosition.portfolio_id == portfolio_id).one()
+        assert float(after.realized_gain) == 300.0
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_patch_edit_can_invalidate_closure_and_remove_closed_row():
+    client, SessionLocal = _build_client()
+    db: Session = SessionLocal()
+    try:
+        portfolio_id = _seed_portfolio(db, name="ClosedPatchInvalidate")
+        d0 = date.today() - timedelta(days=3)
+        d1 = date.today() - timedelta(days=2)
+        create_transaction(
+            db,
+            portfolio_id=portfolio_id,
+            ticker="AAPL",
+            tx_type="BUY",
+            quantity=10,
+            price=100,
+            trade_date=d0,
+            currency="USD",
+        )
+        sell = create_transaction(
+            db,
+            portfolio_id=portfolio_id,
+            ticker="AAPL",
+            tx_type="SELL",
+            quantity=10,
+            price=110,
+            trade_date=d1,
+            currency="USD",
+        )
+        _seed_price(db, "AAPL", d0, 100)
+        _seed_price(db, "AAPL", d1, 110)
+        rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True)
+        assert db.query(ClosedPosition).filter(ClosedPosition.portfolio_id == portfolio_id).count() == 1
+
+        patched = client.patch(
+            f"/transactions/{sell['id']}",
+            json={"quantity": 2, "price": 110, "date": d1.isoformat(), "currency": "USD"},
+        )
+        assert patched.status_code == 200
+        assert db.query(ClosedPosition).filter(ClosedPosition.portfolio_id == portfolio_id).count() == 0
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
