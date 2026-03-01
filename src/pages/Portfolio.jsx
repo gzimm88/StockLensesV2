@@ -111,6 +111,46 @@ function formatYahooXAxisTick(value) {
   return `${day}`;
 }
 
+function normalizeTickerKey(value) {
+  return String(value || "")
+    .split(":")
+    .pop()
+    .trim()
+    .toUpperCase()
+    .replace(/-/g, ".");
+}
+
+function computeOpenLotsForTicker(rows) {
+  const lots = [];
+  const txs = [...rows].sort((a, b) => String(a.trade_date).localeCompare(String(b.trade_date)));
+  for (const tx of txs) {
+    const type = String(tx.type || "").toUpperCase();
+    const shares = Number(tx.shares || 0);
+    const price = Number(tx.price || 0);
+    if (!Number.isFinite(shares) || shares <= 0) continue;
+    if (type === "BUY") {
+      lots.push({
+        id: tx.id,
+        trade_date: tx.trade_date,
+        shares_open: shares,
+        price,
+      });
+      continue;
+    }
+    if (type === "SELL") {
+      let remaining = shares;
+      while (remaining > 0 && lots.length > 0) {
+        const lot = lots[0];
+        const take = Math.min(lot.shares_open, remaining);
+        lot.shares_open -= take;
+        remaining -= take;
+        if (lot.shares_open <= 1e-10) lots.shift();
+      }
+    }
+  }
+  return lots.filter((lot) => lot.shares_open > 1e-10);
+}
+
 const EMPTY_TX = {
   ticker: "",
   type: "Buy",
@@ -150,6 +190,7 @@ export default function Portfolio() {
   const [hoveredEquity, setHoveredEquity] = React.useState(null);
   const [equitySeries, setEquitySeries] = React.useState([]);
   const [portfolioSettings, setPortfolioSettings] = React.useState(null);
+  const [withholdingInput, setWithholdingInput] = React.useState("");
   const [isSavingSettings, setIsSavingSettings] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [txDirty, setTxDirty] = React.useState(false);
@@ -163,6 +204,8 @@ export default function Portfolio() {
   const [holdingsSortDirection, setHoldingsSortDirection] = React.useState("desc");
   const [closedSortField, setClosedSortField] = React.useState("close_date");
   const [closedSortDirection, setClosedSortDirection] = React.useState("desc");
+  const [expandedHoldingTicker, setExpandedHoldingTicker] = React.useState("");
+  const [holdingDetailTabByTicker, setHoldingDetailTabByTicker] = React.useState({});
 
   const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
   const displayCurrency = portfolioSettings?.base_currency || selectedPortfolio?.base_currency || "USD";
@@ -221,6 +264,33 @@ export default function Portfolio() {
   const sortIndicator = (field) => {
     if (holdingsSortField !== field) return "";
     return holdingsSortDirection === "desc" ? "▾" : "▴";
+  };
+
+  const toggleHoldingDetails = (ticker) => {
+    setExpandedHoldingTicker((prev) => (prev === ticker ? "" : ticker));
+    setHoldingDetailTabByTicker((prev) => ({
+      ...prev,
+      [ticker]: prev[ticker] || "transactions",
+    }));
+  };
+
+  const setHoldingDetailTab = (ticker, tab) => {
+    setHoldingDetailTabByTicker((prev) => ({ ...prev, [ticker]: tab }));
+  };
+
+  const openAddTxForTicker = (ticker, lastPrice) => {
+    setEditTxId(null);
+    setTxForm({
+      ...EMPTY_TX,
+      ticker,
+      type: "Buy",
+      trade_date: new Date().toISOString().slice(0, 10),
+      shares: "",
+      price: lastPrice != null && !Number.isNaN(Number(lastPrice)) ? String(Number(lastPrice)) : "",
+      currency: selectedPortfolio?.base_currency || "USD",
+      note: "",
+    });
+    setShowTxModal(true);
   };
 
   const toggleClosedSort = (field) => {
@@ -435,6 +505,15 @@ export default function Portfolio() {
       }
     })();
   }, [selectedPortfolioId, equityRange, equityPerformanceMode]);
+
+  React.useEffect(() => {
+    if (!portfolioSettings) {
+      setWithholdingInput("");
+      return;
+    }
+    const value = portfolioSettings?.dividend_withholding_percent;
+    setWithholdingInput(value === null || value === undefined ? "" : String(value));
+  }, [portfolioSettings]);
 
   const handleFileChange = (event) => {
     const file = event.target.files?.[0] ?? null;
@@ -735,6 +814,41 @@ export default function Portfolio() {
               />
               Reinvest dividends overlay
             </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={Boolean(portfolioSettings?.apply_dividend_withholding ?? false)}
+                disabled={isSavingSettings}
+                onChange={(e) =>
+                  saveSettings({
+                    apply_dividend_withholding: e.target.checked,
+                    dividend_withholding_percent: e.target.checked
+                      ? Number(withholdingInput || 0)
+                      : null,
+                  })
+                }
+              />
+              Apply dividend withholding tax
+            </label>
+            <div className="max-w-56">
+              <label className="text-xs text-slate-500">Withholding (%)</label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                value={withholdingInput}
+                disabled={isSavingSettings || !Boolean(portfolioSettings?.apply_dividend_withholding)}
+                onChange={(e) => setWithholdingInput(e.target.value)}
+                onBlur={() => {
+                  if (!Boolean(portfolioSettings?.apply_dividend_withholding)) return;
+                  const parsed = Number(withholdingInput);
+                  if (Number.isNaN(parsed)) return;
+                  saveSettings({ dividend_withholding_percent: parsed });
+                }}
+                className="mt-1 w-full border rounded px-2 py-1"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSettingsOpen(false)}>Close</Button>
@@ -939,7 +1053,7 @@ export default function Portfolio() {
                 <table className="w-full text-sm border-collapse">
                   <thead>
                     <tr className="border-b bg-slate-900 text-slate-100">
-                      <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("ticker")}>Symbol {sortIndicator("ticker")}</button></th>
+                      <th className="text-left py-2 px-2 whitespace-nowrap"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("ticker")}>Symbol {sortIndicator("ticker")}</button></th>
                       <th className="text-left py-2 px-2">Status</th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("quantity")}>Shares {sortIndicator("quantity")}</button></th>
                       <th className="text-left py-2 px-2"><button className="font-medium hover:text-white" onClick={() => toggleHoldingsSort("market_price")}>Last Price {sortIndicator("market_price")}</button></th>
@@ -959,36 +1073,200 @@ export default function Portfolio() {
                     {holdingsRows.length === 0 ? (
                       <tr><td colSpan={14} className="py-3 text-slate-500">No holdings snapshot available.</td></tr>
                     ) : (
-                      sortedHoldingsRows.map((row) => (
-                        <tr key={row.ticker} className="border-b hover:bg-slate-50">
-                          <td className="py-2 px-2 font-mono text-blue-700">{row.ticker}</td>
-                          <td className="py-2 px-2">Open</td>
-                          <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis_native, row.native_currency || displayCurrency)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
-                          <td className="py-2 px-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
-                          <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtPercent(row.day_change_percent)}
-                          </td>
-                          <td className={`py-2 px-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtCurrency(row.day_change_value, displayCurrency)}
-                          </td>
-                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtPercent(row.unrealized_gain_percent)}
-                          </td>
-                          <td className={`py-2 px-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
-                          </td>
-                          <td className={`py-2 px-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
-                          </td>
-                          <td className={`py-2 px-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
-                            {fmtCurrency(row.realized_gain_value, displayCurrency)}
-                          </td>
-                        </tr>
-                      ))
+                      sortedHoldingsRows.map((row) => {
+                        const ticker = row.ticker;
+                        const tickerKey = normalizeTickerKey(ticker);
+                        const detailTab = holdingDetailTabByTicker[ticker] || "transactions";
+                        const tickerTx = transactions
+                          .filter((tx) => normalizeTickerKey(tx.ticker_raw || tx.ticker || tx.ticker_normalized) === tickerKey && tx.type !== "Dividend")
+                          .sort((a, b) => String(b.trade_date).localeCompare(String(a.trade_date)));
+                        const tickerDivs = transactions
+                          .filter((tx) => normalizeTickerKey(tx.ticker_raw || tx.ticker || tx.ticker_normalized) === tickerKey && tx.type === "Dividend")
+                          .sort((a, b) => String(b.trade_date).localeCompare(String(a.trade_date)));
+                        const tickerLots = computeOpenLotsForTicker(tickerTx);
+                        const isExpanded = expandedHoldingTicker === ticker;
+
+                        return (
+                          <React.Fragment key={ticker}>
+                            <tr className="border-b hover:bg-slate-50">
+                              <td className="py-2 px-2 font-mono text-blue-700 whitespace-nowrap">
+                                <div className="inline-flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    className="text-slate-500 hover:text-slate-900 text-[11px] leading-none"
+                                    onClick={() => toggleHoldingDetails(ticker)}
+                                    title={isExpanded ? "Hide details" : "Show details"}
+                                  >
+                                    {isExpanded ? "▾" : "▸"}
+                                  </button>
+                                  <span>{ticker}</span>
+                                </div>
+                              </td>
+                              <td className="py-2 px-2">Open</td>
+                              <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis_native, row.native_currency || displayCurrency)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
+                              <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtPercent(row.day_change_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.day_change_value, displayCurrency)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtPercent(row.unrealized_gain_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.realized_gain_value, displayCurrency)}
+                              </td>
+                            </tr>
+                            {isExpanded && (
+                              <tr className="border-b bg-slate-50">
+                                <td colSpan={14} className="p-3">
+                                  <div className="space-y-3">
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        className={`px-3 py-1 text-xs rounded border ${detailTab === "share_lots" ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-slate-300 text-slate-700"}`}
+                                        onClick={() => setHoldingDetailTab(ticker, "share_lots")}
+                                      >
+                                        Share Lots
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`px-3 py-1 text-xs rounded border ${detailTab === "transactions" ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-slate-300 text-slate-700"}`}
+                                        onClick={() => setHoldingDetailTab(ticker, "transactions")}
+                                      >
+                                        Transactions
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`px-3 py-1 text-xs rounded border ${detailTab === "dividends" ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-slate-300 text-slate-700"}`}
+                                        onClick={() => setHoldingDetailTab(ticker, "dividends")}
+                                      >
+                                        Dividends
+                                      </button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => openAddTxForTicker(ticker, row.market_price)}
+                                      >
+                                        Add Transaction
+                                      </Button>
+                                    </div>
+
+                                    {detailTab === "share_lots" && (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-xs border-collapse">
+                                          <thead>
+                                            <tr className="border-b">
+                                              <th className="text-left py-1">Date</th>
+                                              <th className="text-left py-1">Shares Open</th>
+                                              <th className="text-left py-1">Cost/Share</th>
+                                              <th className="text-left py-1">Total Cost</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {tickerLots.length === 0 ? (
+                                              <tr><td colSpan={4} className="py-2 text-slate-500">No open lots for {ticker}.</td></tr>
+                                            ) : tickerLots.map((lot) => (
+                                              <tr key={lot.id} className="border-b">
+                                                <td className="py-1">{lot.trade_date}</td>
+                                                <td className="py-1">{fmtNumber(lot.shares_open, 6)}</td>
+                                                <td className="py-1">{fmtCurrency(lot.price, displayCurrency)}</td>
+                                                <td className="py-1">{fmtCurrency(Number(lot.shares_open) * Number(lot.price), displayCurrency)}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    )}
+
+                                    {detailTab === "transactions" && (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-xs border-collapse">
+                                          <thead>
+                                            <tr className="border-b">
+                                              <th className="text-left py-1">Date</th>
+                                              <th className="text-left py-1">Type</th>
+                                              <th className="text-left py-1">Shares</th>
+                                              <th className="text-left py-1">Cost/Share</th>
+                                              <th className="text-left py-1">Total</th>
+                                              <th className="text-left py-1">Actions</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {tickerTx.length === 0 ? (
+                                              <tr><td colSpan={6} className="py-2 text-slate-500">No transactions for {ticker}.</td></tr>
+                                            ) : tickerTx.map((tx) => (
+                                              <tr key={tx.id} className="border-b">
+                                                <td className="py-1">{tx.trade_date}</td>
+                                                <td className="py-1">{tx.type}</td>
+                                                <td className="py-1">{fmtNumber(tx.shares, 6)}</td>
+                                                <td className="py-1">{fmtCurrency(tx.price, displayCurrency)}</td>
+                                                <td className="py-1">{fmtCurrency((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0), displayCurrency)}</td>
+                                                <td className="py-1">
+                                                  <div className="flex gap-1">
+                                                    <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>
+                                                    <Button size="sm" variant="outline" onClick={() => deleteTx(tx.id)} disabled={deletingTxId === tx.id}>
+                                                      {deletingTxId === tx.id ? "Deleting..." : "Delete"}
+                                                    </Button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    )}
+
+                                    {detailTab === "dividends" && (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-xs border-collapse">
+                                          <thead>
+                                            <tr className="border-b">
+                                              <th className="text-left py-1">Date</th>
+                                              <th className="text-left py-1">Dividend/Share</th>
+                                              <th className="text-left py-1">Quantity</th>
+                                              <th className="text-left py-1">Total Amount</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {tickerDivs.length === 0 ? (
+                                              <tr><td colSpan={4} className="py-2 text-slate-500">No dividends for {ticker}.</td></tr>
+                                            ) : tickerDivs.map((tx) => {
+                                              const meta = tx.metadata || {};
+                                              const perShare = meta?.dividend_per_share_native;
+                                              const qty = meta?.entitled_shares ?? tx.shares;
+                                              const total = meta?.net_amount_base ?? ((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0));
+                                              return (
+                                                <tr key={tx.id} className="border-b">
+                                                  <td className="py-1">{tx.trade_date}</td>
+                                                  <td className="py-1">{perShare == null ? "-" : fmtNumber(perShare, 4)}</td>
+                                                  <td className="py-1">{qty == null ? "-" : fmtNumber(qty, 4)}</td>
+                                                  <td className="py-1">{fmtCurrency(total, displayCurrency)}</td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -1005,10 +1283,10 @@ export default function Portfolio() {
                         <th className="text-left py-2">Holding period</th>
                         <th className="text-left py-2">Cost basis</th>
                         <th className="text-left py-2">Proceeds</th>
+                        <th className="text-left py-2">Dividends</th>
                         <th className="text-left py-2">Realized gain $</th>
                         <th className="text-left py-2">Realized gain %</th>
                         <th className="text-left py-2">FX component</th>
-                        <th className="text-left py-2">Dividends</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1022,6 +1300,7 @@ export default function Portfolio() {
                           <td className="py-2">{row.holding_period_days}</td>
                           <td className="py-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
                           <td className="py-2">{fmtCurrency(row.total_proceeds, displayCurrency)}</td>
+                          <td className="py-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
                           <td className={`py-2 ${Number(row.realized_gain || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.realized_gain, displayCurrency)}
                           </td>
@@ -1031,7 +1310,6 @@ export default function Portfolio() {
                           <td className={`py-2 ${Number(row.fx_component || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>
                             {fmtCurrency(row.fx_component, displayCurrency)}
                           </td>
-                          <td className="py-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
                         </tr>
                       ))}
                     </tbody>

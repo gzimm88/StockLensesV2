@@ -156,18 +156,37 @@ export async function updatePortfolioSettings(portfolioId, payload) {
 }
 
 export function listPortfolioTransactions(portfolioId) {
+  const normalizeType = (value) => {
+    const v = String(value || "").toUpperCase();
+    if (v === "BUY") return "Buy";
+    if (v === "SELL") return "Sell";
+    if (v === "DIVIDEND") return "Dividend";
+    return value || "";
+  };
+  const normalizeTicker = (value) =>
+    String(value || "")
+      .split(":")
+      .pop()
+      .trim()
+      .toUpperCase()
+      .replace(/-/g, ".");
+
   const normalize = (res) => {
     const raw = res?.data?.transactions || [];
     const mapped = raw.map((tx) => ({
       id: tx.id,
       ticker: tx.ticker,
       ticker_raw: tx.ticker_raw || tx.ticker,
-      type: tx.type,
+      ticker_normalized: normalizeTicker(tx.ticker_raw || tx.ticker),
+      type: normalizeType(tx.type),
       trade_date: tx.trade_date || tx.date,
       shares: tx.shares ?? tx.quantity,
       price: tx.price,
       currency: tx.currency,
       note: tx.note ?? null,
+      metadata: tx.metadata ?? null,
+      is_generated: Boolean(tx.is_generated),
+      generated_event_id: tx.generated_event_id ?? null,
       version: tx.version,
       created_at: tx.created_at,
       updated_at: tx.updated_at,

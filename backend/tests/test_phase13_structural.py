@@ -107,7 +107,7 @@ def test_dividend_auto_posting_from_dividend_events():
         ticker="AAPL",
         ex_date=d0,
         pay_date=d1,
-        amount_per_share=1.0,
+        dividend_per_share_native=1.0,
         currency="USD",
         source="seed",
         source_hash="div-auto-aapl",

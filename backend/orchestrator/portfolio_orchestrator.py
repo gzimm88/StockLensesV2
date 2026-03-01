@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -62,7 +63,7 @@ _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
 _LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER_CHANGE", "MERGE"}
 _DECIMAL_MONEY_SCALE = Decimal("0.0000000001")
 _DECIMAL_RATE_SCALE = Decimal("0.000000000001")
-_EQUITY_ENGINE_VERSION = "phase13-v1"
+_EQUITY_ENGINE_VERSION = "phase14-v1"
 
 _EXCHANGE_NATIVE_CCY: dict[str, str] = {
     "NYSE": "USD",
@@ -630,8 +631,28 @@ def export_prices_for_engine(
 
 def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -> str:
     exchange, normalized_symbol, vendor_symbol = _split_source_symbol(raw_symbol, ticker)
-    sec_id = _security_id(normalized_symbol, exchange)
     now = datetime.utcnow()
+    raw_has_exchange = bool(raw_symbol and ":" in raw_symbol)
+
+    mapped = None
+    if raw_symbol:
+        mapped = db.query(SecuritySymbolMap).filter(SecuritySymbolMap.raw_input_symbol == raw_symbol).first()
+
+    sec_id = _security_id(normalized_symbol, exchange)
+
+    # For unqualified raw symbols (e.g. "MSFT"), reuse existing canonical identity if available.
+    if not raw_has_exchange:
+        if mapped is not None:
+            sec_id = mapped.security_id
+        else:
+            normalized_rows = (
+                db.query(SecurityIdentity)
+                .filter(SecurityIdentity.normalized_symbol == normalized_symbol)
+                .order_by(SecurityIdentity.created_at.asc(), SecurityIdentity.security_id.asc())
+                .all()
+            )
+            if len(normalized_rows) == 1:
+                sec_id = normalized_rows[0].security_id
 
     ident = db.query(SecurityIdentity).filter(SecurityIdentity.security_id == sec_id).first()
     if ident is None:
@@ -652,7 +673,6 @@ def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -
         ident.raw_symbol_example = ident.raw_symbol_example or (raw_symbol or ticker)
 
     if raw_symbol:
-        mapped = db.query(SecuritySymbolMap).filter(SecuritySymbolMap.raw_input_symbol == raw_symbol).first()
         if mapped and mapped.security_id != sec_id:
             raise PortfolioEngineError(
                 f"Ticker identity fork detected: raw symbol '{raw_symbol}' maps to multiple security ids."
@@ -663,8 +683,8 @@ def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -
                     id=str(uuid.uuid4()),
                     raw_input_symbol=raw_symbol,
                     normalized_symbol=normalized_symbol,
-                    exchange=exchange,
-                    mic=exchange,
+                    exchange=ident.exchange,
+                    mic=ident.mic,
                     vendor_symbol=vendor_symbol,
                     security_id=sec_id,
                     created_at=now,
@@ -674,6 +694,9 @@ def _ensure_security_mapping(db: Session, ticker: str, raw_symbol: str | None) -
         else:
             mapped.updated_at = now
             mapped.vendor_symbol = mapped.vendor_symbol or vendor_symbol
+            mapped.normalized_symbol = mapped.normalized_symbol or normalized_symbol
+            mapped.exchange = mapped.exchange or ident.exchange
+            mapped.mic = mapped.mic or ident.mic
     return sec_id
 
 
@@ -956,6 +979,14 @@ def _ensure_ticker_metadata_from_transactions(db: Session, rows: list[PortfolioT
     db.flush()
 
 
+def _validate_portfolio_dividend_withholding(portfolio: Portfolio) -> None:
+    if not bool(portfolio.apply_dividend_withholding):
+        return
+    pct = float(portfolio.dividend_withholding_percent or 0.0)
+    if pct < 0.0 or pct > 100.0:
+        raise PortfolioEngineError("dividend_withholding_percent must be between 0 and 100 when withholding is enabled.")
+
+
 def _normalize_corporate_action_type(action_type: str) -> str:
     value = (action_type or "").strip().upper()
     if value not in _LEDGER_ACTION_TYPES:
@@ -1140,7 +1171,7 @@ def _compute_tx_booking_facts(
 
 def list_transactions_for_portfolio(db: Session, portfolio_id: str) -> list[dict[str, object]]:
     get_portfolio_or_error(db, portfolio_id)
-    rows = [r for r in _sorted_active_transactions(db, portfolio_id) if not bool(r.is_generated)]
+    rows = _sorted_active_transactions(db, portfolio_id)
     out: list[dict[str, object]] = []
     for r in rows:
         out.append(
@@ -1157,6 +1188,9 @@ def list_transactions_for_portfolio(db: Session, portfolio_id: str) -> list[dict
                 "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
                 "updated_at": r.updated_at.isoformat() + "Z" if r.updated_at else None,
                 "deleted_at": r.deleted_at.isoformat() + "Z" if r.deleted_at else None,
+                "is_generated": bool(r.is_generated),
+                "generated_event_id": r.generated_event_id,
+                "metadata": _parse_metadata(r.metadata_json),
             }
         )
     return out
@@ -2459,6 +2493,12 @@ def get_portfolio_settings(db: Session, portfolio_id: str) -> dict[str, object]:
         "cash_management_mode": str(settings["cash_management_mode"]),
         "include_dividends_in_performance": bool(settings["include_dividends_in_performance"]),
         "reinvest_dividends_overlay": bool(settings["reinvest_dividends_overlay"]),
+        "apply_dividend_withholding": bool(portfolio.apply_dividend_withholding),
+        "dividend_withholding_percent": (
+            float(portfolio.dividend_withholding_percent)
+            if portfolio.dividend_withholding_percent is not None
+            else None
+        ),
         "version": int(settings["version"]),
     }
 
@@ -2470,8 +2510,10 @@ def update_portfolio_settings(
     cash_management_mode: str | None = None,
     include_dividends_in_performance: bool | None = None,
     reinvest_dividends_overlay: bool | None = None,
+    apply_dividend_withholding: bool | None = None,
+    dividend_withholding_percent: float | None = None,
 ) -> dict[str, object]:
-    get_portfolio_or_error(db, portfolio_id)
+    portfolio = get_portfolio_or_error(db, portfolio_id)
     current_row = (
         db.query(PortfolioSettings)
         .filter(
@@ -2497,6 +2539,24 @@ def update_portfolio_settings(
         if reinvest_dividends_overlay is not None
         else bool(current["reinvest_dividends_overlay"])
     )
+    next_apply_withholding = (
+        bool(apply_dividend_withholding)
+        if apply_dividend_withholding is not None
+        else bool(portfolio.apply_dividend_withholding)
+    )
+    if next_apply_withholding:
+        source_percent = (
+            dividend_withholding_percent
+            if dividend_withholding_percent is not None
+            else portfolio.dividend_withholding_percent
+        )
+        if source_percent is None:
+            raise PortfolioEngineError("dividend_withholding_percent is required when withholding is enabled.")
+        next_withholding_percent = float(source_percent)
+        if next_withholding_percent < 0 or next_withholding_percent > 100:
+            raise PortfolioEngineError("dividend_withholding_percent must be between 0 and 100.")
+    else:
+        next_withholding_percent = None
 
     now = datetime.utcnow()
     if current_row is not None:
@@ -2524,6 +2584,9 @@ def update_portfolio_settings(
         is_deleted=False,
     )
     db.add(row)
+    portfolio.apply_dividend_withholding = next_apply_withholding
+    portfolio.dividend_withholding_percent = next_withholding_percent
+    portfolio.updated_at = now
     db.commit()
     return get_portfolio_settings(db, portfolio_id)
 
@@ -2680,7 +2743,7 @@ def _source_hash_for_window(
             "ticker": e.ticker,
             "ex_date": e.ex_date.isoformat(),
             "pay_date": e.pay_date.isoformat(),
-            "amount_per_share": float(e.amount_per_share or 0.0),
+            "dividend_per_share_native": float(e.dividend_per_share_native or 0.0),
             "currency": e.currency or "USD",
             "source_hash": e.source_hash or "",
         }
@@ -2758,6 +2821,299 @@ def _latest_completed_equity_build(db: Session, portfolio_id: str) -> PortfolioE
         .order_by(PortfolioEquityHistoryBuild.build_version.desc(), PortfolioEquityHistoryBuild.finished_at.desc())
         .first()
     )
+
+
+def _parse_provider_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
+def _dividend_source_hash(
+    *,
+    source: str,
+    ticker: str,
+    ex_date: date,
+    pay_date: date,
+    amount_per_share_native: Decimal,
+    currency: str,
+) -> str:
+    raw = json.dumps(
+        {
+            "source": source,
+            "ticker": ticker,
+            "ex_date": ex_date.isoformat(),
+            "pay_date": pay_date.isoformat(),
+            "dividend_per_share_native": str(amount_per_share_native),
+            "currency": currency,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _ticker_vendor_symbol_map_from_transactions(
+    rows: list[PortfolioTransaction],
+) -> dict[str, str]:
+    by_ticker: dict[str, str] = {}
+    ordered = sorted(rows, key=lambda r: (r.trade_date, r.created_at or datetime.min, r.id))
+    for tx in ordered:
+        ticker = (tx.ticker_symbol_normalized or "").strip().upper()
+        if not ticker or ticker in by_ticker:
+            continue
+        fetch_symbol, _ = _to_fetch_symbol(ticker, tx.ticker_symbol_raw)
+        by_ticker[ticker] = fetch_symbol
+    return by_ticker
+
+
+def _fetch_finnhub_dividend_rows(
+    *,
+    vendor_symbol: str,
+    from_date: date,
+    to_date: date,
+) -> tuple[list[dict[str, object]], bool]:
+    token = (os.environ.get("FINNHUB_API_KEY") or "").strip()
+    if not token:
+        return [], False
+    url = "https://finnhub.io/api/v1/stock/dividend"
+    params = {
+        "symbol": vendor_symbol,
+        "from": from_date.isoformat(),
+        "to": to_date.isoformat(),
+        "token": token,
+    }
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.get(url, params=params)
+        if not resp.is_success:
+            logger.warning("[DividendBackfill] Finnhub failed for %s: HTTP %s", vendor_symbol, resp.status_code)
+            return [], False
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("[DividendBackfill] Finnhub failed for %s: %s", vendor_symbol, exc)
+        return [], False
+
+    items: list[dict[str, object]] = []
+    if isinstance(payload, dict):
+        maybe = payload.get("historical")
+        if isinstance(maybe, list):
+            items = [x for x in maybe if isinstance(x, dict)]
+    elif isinstance(payload, list):
+        items = [x for x in payload if isinstance(x, dict)]
+    return items, True
+
+
+def _fetch_yahoo_dividend_rows(
+    *,
+    vendor_symbol: str,
+    from_date: date,
+    to_date: date,
+) -> tuple[list[dict[str, object]], bool]:
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        logger.warning("[DividendBackfill] yfinance import failed: %s", exc)
+        return [], False
+
+    try:
+        series = yf.Ticker(vendor_symbol).dividends
+        if series is None or len(series) == 0:
+            return [], True
+        rows: list[dict[str, object]] = []
+        for idx, val in series.items():
+            ex_d = idx.date()
+            if ex_d < from_date or ex_d > to_date:
+                continue
+            try:
+                amt = float(val)
+            except Exception:
+                continue
+            rows.append({"exDate": ex_d.isoformat(), "payDate": ex_d.isoformat(), "amount": amt})
+        rows.sort(key=lambda r: str(r.get("exDate") or ""))
+        return rows, True
+    except Exception as exc:
+        logger.warning("[DividendBackfill] Yahoo dividends failed for %s: %s", vendor_symbol, exc)
+        return [], False
+
+
+def backfill_dividend_history_if_missing(
+    portfolio_id: str,
+    db: Session,
+    *,
+    strict: bool = False,
+) -> dict[str, object]:
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    tx_rows = _sorted_active_transactions_for_window(db, portfolio_id, include_generated=False)
+    if not tx_rows:
+        return {
+            "portfolio_id": portfolio_id,
+            "inserted_rows": 0,
+            "fetched_tickers": [],
+            "from_date": None,
+            "to_date": None,
+            "strict": bool(strict),
+        }
+
+    _ensure_ticker_metadata_from_transactions(db, tx_rows)
+    earliest_tx = min(r.trade_date for r in tx_rows)
+    to_d = date.today()
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
+    vendor_map = _ticker_vendor_symbol_map_from_transactions(tx_rows)
+    tickers = sorted({r.ticker_symbol_normalized for r in tx_rows if r.ticker_symbol_normalized})
+    inserted_rows = 0
+    fetched_tickers: list[str] = []
+    known_dividend_tickers: set[str] = set()
+
+    for ticker in tickers:
+        existing_any = (
+            db.query(DividendEvent.id)
+            .filter(
+                DividendEvent.ticker == ticker,
+                DividendEvent.ex_date >= earliest_tx,
+                DividendEvent.ex_date <= to_d,
+            )
+            .first()
+            is not None
+        )
+        if existing_any:
+            known_dividend_tickers.add(ticker)
+            continue
+
+        vendor_symbol = vendor_map.get(ticker, ticker)
+        event_rows, finnhub_ok = _fetch_finnhub_dividend_rows(
+            vendor_symbol=vendor_symbol,
+            from_date=earliest_tx,
+            to_date=to_d,
+        )
+        source = "finnhub"
+        if not event_rows:
+            yahoo_rows, yahoo_ok = _fetch_yahoo_dividend_rows(
+                vendor_symbol=vendor_symbol,
+                from_date=earliest_tx,
+                to_date=to_d,
+            )
+            if yahoo_rows:
+                event_rows = yahoo_rows
+                source = "yahoo"
+            elif not finnhub_ok and not yahoo_ok:
+                # Provider availability failure should not break strict mode.
+                continue
+
+        fetched_tickers.append(ticker)
+        if event_rows:
+            known_dividend_tickers.add(ticker)
+
+        for item in event_rows:
+            ex_d = _parse_provider_date(item.get("exDate") or item.get("ex_date") or item.get("date"))
+            pay_d = _parse_provider_date(
+                item.get("payDate") or item.get("paymentDate") or item.get("pay_date") or item.get("date")
+            )
+            if ex_d is None:
+                continue
+            if pay_d is None:
+                pay_d = ex_d
+            try:
+                amt = _to_decimal(
+                    item.get("amount")
+                    if item.get("amount") is not None
+                    else item.get("dividend")
+                    if item.get("dividend") is not None
+                    else item.get("cashAmount"),
+                    scale=_DECIMAL_MONEY_SCALE,
+                )
+            except Exception:
+                continue
+            if amt <= Decimal("0"):
+                continue
+            ccy = (
+                str(item.get("currency") or ticker_currency.get(ticker) or portfolio.base_currency or "USD")
+                .strip()
+                .upper()
+                or "USD"
+            )
+            shash = _dividend_source_hash(
+                source=source,
+                ticker=ticker,
+                ex_date=ex_d,
+                pay_date=pay_d,
+                amount_per_share_native=amt,
+                currency=ccy,
+            )
+            exists = (
+                db.query(DividendEvent.id)
+                .filter(
+                    DividendEvent.source_hash == shash,
+                )
+                .first()
+                is not None
+            )
+            if exists:
+                continue
+            duplicate = (
+                db.query(DividendEvent.id)
+                .filter(
+                    DividendEvent.ticker == ticker,
+                    DividendEvent.ex_date == ex_d,
+                    DividendEvent.dividend_per_share_native == amt,
+                )
+                .first()
+                is not None
+            )
+            if duplicate:
+                continue
+            db.add(
+                DividendEvent(
+                    id=str(uuid.uuid4()),
+                    ticker=ticker,
+                    ex_date=ex_d,
+                    pay_date=pay_d,
+                    amount_per_share=amt,
+                    dividend_per_share_native=amt,
+                    currency=ccy,
+                    source=source,
+                    source_hash=shash,
+                    created_at=datetime.utcnow(),
+                )
+            )
+            inserted_rows += 1
+
+    db.commit()
+
+    if strict:
+        for ticker in sorted(known_dividend_tickers):
+            has_rows = (
+                db.query(DividendEvent.id)
+                .filter(
+                    DividendEvent.ticker == ticker,
+                    DividendEvent.ex_date >= earliest_tx,
+                    DividendEvent.ex_date <= to_d,
+                )
+                .first()
+                is not None
+            )
+            if not has_rows:
+                raise PortfolioEngineError(
+                    f"Dividend history expected but unavailable for {ticker} after ingestion attempt."
+                )
+
+    return {
+        "portfolio_id": portfolio_id,
+        "inserted_rows": inserted_rows,
+        "fetched_tickers": fetched_tickers,
+        "from_date": earliest_tx.isoformat(),
+        "to_date": to_d.isoformat(),
+        "strict": bool(strict),
+    }
 
 
 def _active_dividend_events_for_tickers(
@@ -2877,8 +3233,16 @@ def _apply_generated_dividend_transactions(
             )
             if entitled_shares <= Decimal("0"):
                 continue
-            amount_per_share = _to_decimal(ev.amount_per_share)
+            amount_per_share = _to_decimal(ev.dividend_per_share_native)
             gross_local = (entitled_shares * amount_per_share).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            withholding_rate = Decimal("0")
+            if bool(portfolio.apply_dividend_withholding):
+                withholding_rate = _to_decimal(
+                    float(portfolio.dividend_withholding_percent or 0.0),
+                    scale=_DECIMAL_RATE_SCALE,
+                ) / Decimal("100")
+            withholding_local = (gross_local * withholding_rate).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            net_local = (gross_local - withholding_local).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             event_currency = (ev.currency or portfolio.base_currency or "USD").strip().upper() or "USD"
             fx_rate = _lookup_close_fx_rate(
                 db,
@@ -2886,17 +3250,32 @@ def _apply_generated_dividend_transactions(
                 base_currency=(portfolio.base_currency or "USD"),
                 on_date=ev.pay_date,
             )
-            gross_base = (gross_local * fx_rate).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
-            pending_by_pay[ev.pay_date].append((ev, entitled_shares, gross_local, gross_base))
+            net_base = (net_local * fx_rate).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            pending_by_pay[ev.pay_date].append((ev, entitled_shares, gross_local, net_base))
 
         for ev, entitled_shares, gross_local, gross_base in pending_by_pay.get(d, []):
+            withholding_local = Decimal("0")
+            withholding_rate_pct = float(portfolio.dividend_withholding_percent or 0.0) if bool(portfolio.apply_dividend_withholding) else 0.0
+            if bool(portfolio.apply_dividend_withholding):
+                withholding_local = (
+                    _to_decimal(gross_local)
+                    * (_to_decimal(withholding_rate_pct, scale=_DECIMAL_RATE_SCALE) / Decimal("100"))
+                ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            net_local = (_to_decimal(gross_local) - withholding_local).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
             metadata = {
                 "generated": True,
                 "dividend_event_id": ev.id,
                 "ex_date": ev.ex_date.isoformat(),
                 "pay_date": ev.pay_date.isoformat(),
                 "entitled_shares": float(entitled_shares),
-                "amount_per_share": float(_to_decimal(ev.amount_per_share)),
+                "dividend_per_share_native": float(_to_decimal(ev.dividend_per_share_native)),
+                "gross_amount_native": float(_to_decimal(gross_local)),
+                "withholding_percent": withholding_rate_pct,
+                "withholding_amount_native": float(withholding_local),
+                "net_amount_native": float(net_local),
+                "net_amount_base": float(_to_decimal(gross_base)),
             }
             generated_rows.append(
                 PortfolioTransaction(
@@ -2908,13 +3287,13 @@ def _apply_generated_dividend_transactions(
                     tx_type="Dividend",
                     trade_date=ev.pay_date,
                     shares=float(entitled_shares),
-                    price=float(gross_local),
-                    gross_amount=float(gross_local),
+                    price=float(net_local),
+                    gross_amount=float(net_local),
                     fx_at_execution=float(
-                        (_to_decimal(gross_base) / _to_decimal(gross_local)).quantize(
+                        (_to_decimal(gross_base) / net_local).quantize(
                             _DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP
                         )
-                        if _to_decimal(gross_local) != Decimal("0")
+                        if net_local != Decimal("0")
                         else Decimal("1")
                     ),
                     gross_amount_base=float(gross_base),
@@ -3149,6 +3528,7 @@ def rebuild_equity_history(
     strict: bool | None = None,
 ) -> dict[str, object]:
     portfolio = get_portfolio_or_error(db, portfolio_id)
+    _validate_portfolio_dividend_withholding(portfolio)
     settings = _load_portfolio_settings(db, portfolio_id)
     mode_norm = (mode or "incremental").strip().lower()
     if mode_norm not in {"incremental", "full"}:
@@ -3388,9 +3768,43 @@ def rebuild_equity_history(
                 ticker = tx.ticker_symbol_normalized
                 shares = _to_decimal(tx.shares)
                 gross_base = _tx_base_amount(tx)
-                tx_currency = (tx.currency or base_currency).strip().upper() or base_currency
-                tx_fx = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
-                tx_local_notional = (shares * _to_decimal(tx.price)).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+                ticker_ccy = (ticker_currency.get(ticker) or base_currency).strip().upper() or base_currency
+                tx_local_notional = (shares * _to_decimal(tx.price)).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+                tx_stored_ccy = (tx.currency or "").strip().upper() or base_currency
+                if ticker_ccy == base_currency:
+                    tx_local_notional = gross_base
+                    tx_fx = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                else:
+                    tx_fx = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
+                    derived_fx = (
+                        (gross_base / tx_local_notional).quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                        if tx_local_notional > Decimal("0")
+                        else Decimal("0")
+                    )
+                    # Legacy imports for non-base tickers were often persisted as USD+1.0 execution FX.
+                    # For those rows, recover deterministic execution FX from historical close FX on trade date.
+                    if (
+                        tx_stored_ccy == base_currency
+                        and tx_fx == Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                        and derived_fx == Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
+                    ):
+                        try:
+                            tx_fx = _lookup_close_fx_rate(
+                                db,
+                                quote_currency=ticker_ccy,
+                                base_currency=base_currency,
+                                on_date=tx.trade_date,
+                            )
+                        except PortfolioEngineError:
+                            tx_fx = derived_fx if derived_fx > Decimal("0") else Decimal("1").quantize(
+                                _DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP
+                            )
+                    elif derived_fx > Decimal("0"):
+                        tx_fx = derived_fx
+                    elif tx_fx <= Decimal("0"):
+                        tx_fx = Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP)
                 if tx.tx_type == "Buy":
                     cash -= gross_base
                     if cash_mode == "ignore_cash":
@@ -4101,7 +4515,11 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
                 "dividend_yield_pct": float(dividend_yield_pct),
                 "unrealized_gain_value": float(unrealized),
                 "unrealized_gain_percent": float(unrealized_pct),
-                "realized_gain_value": float(state[ticker]["realized_gain_value"]),
+                "realized_gain_value": float(
+                    (state[ticker]["realized_gain_value"] + total_dividends).quantize(
+                        _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                    )
+                ),
             }
         )
     return {"portfolio_id": portfolio_id, "as_of": as_of.isoformat(), "holdings": rows}
@@ -4556,6 +4974,24 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
     dividend_total = sum((_tx_base_amount(tx) for tx in dividend_rows), Decimal("0")).quantize(
         _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
     )
+    dividend_gross_total = Decimal("0")
+    dividend_withholding_total = Decimal("0")
+    for tx in dividend_rows:
+        meta = _parse_metadata(tx.metadata_json) or {}
+        gross_native = _to_decimal(meta.get("gross_amount_native"))
+        withholding_native = _to_decimal(meta.get("withholding_amount_native"))
+        if gross_native == Decimal("0") and withholding_native == Decimal("0"):
+            # Manual dividend entries are already net values.
+            base_amount = _tx_base_amount(tx)
+            dividend_gross_total += base_amount
+            continue
+        fx_exec = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
+        dividend_gross_total += (gross_native * fx_exec).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        dividend_withholding_total += (withholding_native * fx_exec).quantize(
+            _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+        )
+    dividend_gross_total = dividend_gross_total.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    dividend_withholding_total = dividend_withholding_total.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
 
     invested_rows = (
         db.query(PortfolioTransaction)
@@ -4622,6 +5058,9 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         "unrealized_gain": float(unrealized_total),
         "fx_gain": float(fx_total),
         "dividend_gain": float(dividend_total),
+        "dividend_gross_gain": float(dividend_gross_total),
+        "dividend_withholding": float(dividend_withholding_total),
+        "dividend_net_gain": float(dividend_total),
         "total_gain": float(total_gain),
         "total_gain_pct": float(total_gain_pct),
     }
@@ -4914,6 +5353,7 @@ async def run_portfolio_creation_flow(db: Session, portfolio_id: str, strict: bo
       -> persist outputs
     """
     portfolio = get_portfolio_or_error(db, portfolio_id)
+    _validate_portfolio_dividend_withholding(portfolio)
     run_started = datetime.utcnow()
     transactions = _load_portfolio_transactions_from_db(db, portfolio_id)
     if not transactions:
@@ -5084,6 +5524,7 @@ async def run_portfolio_creation_flow(db: Session, portfolio_id: str, strict: bo
         eq_mode = "incremental" if latest_eq_build else "full"
         eq_force = False if latest_eq_build else True
         backfill_fx_history_if_missing(portfolio_id, db)
+        backfill_dividend_history_if_missing(portfolio_id, db, strict=bool(strict))
         try:
             eq_build = rebuild_equity_history(
                 db,

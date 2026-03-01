@@ -49,6 +49,7 @@ from backend.orchestrator.onboarding_orchestrator import (
     ticker_is_onboarded,
 )
 from backend.orchestrator.portfolio_orchestrator import (
+    backfill_dividend_history_if_missing,
     backfill_fx_history_if_missing,
     create_corporate_action,
     create_transaction,
@@ -434,7 +435,7 @@ def _ensure_phase13_schema() -> None:
                     ticker VARCHAR NOT NULL,
                     ex_date DATE NOT NULL,
                     pay_date DATE NOT NULL,
-                    amount_per_share NUMERIC(24,10) NOT NULL,
+                    dividend_per_share_native NUMERIC(24,10) NOT NULL,
                     currency VARCHAR NOT NULL,
                     source VARCHAR,
                     source_hash VARCHAR NOT NULL,
@@ -455,6 +456,66 @@ def _ensure_phase13_schema() -> None:
 
 
 _ensure_phase13_schema()
+
+
+def _ensure_phase14_schema() -> None:
+    with engine.begin() as conn:
+        portfolio_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(portfolios)"))}
+        if portfolio_cols and "apply_dividend_withholding" not in portfolio_cols:
+            conn.execute(
+                text("ALTER TABLE portfolios ADD COLUMN apply_dividend_withholding BOOLEAN NOT NULL DEFAULT 0")
+            )
+        if portfolio_cols and "dividend_withholding_percent" not in portfolio_cols:
+            conn.execute(text("ALTER TABLE portfolios ADD COLUMN dividend_withholding_percent FLOAT"))
+
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS dividend_events ("
+                "id VARCHAR PRIMARY KEY,"
+                "ticker VARCHAR NOT NULL,"
+                "ex_date DATE NOT NULL,"
+                "pay_date DATE NOT NULL,"
+                "dividend_per_share_native NUMERIC(24,10) NOT NULL,"
+                "currency VARCHAR NOT NULL,"
+                "source VARCHAR,"
+                "source_hash VARCHAR NOT NULL,"
+                "created_at DATETIME"
+                ")"
+            )
+        )
+        div_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(dividend_events)"))}
+        if div_cols and "amount_per_share" not in div_cols:
+            conn.execute(text("ALTER TABLE dividend_events ADD COLUMN amount_per_share NUMERIC(24,10)"))
+            conn.execute(
+                text(
+                    "UPDATE dividend_events SET amount_per_share = dividend_per_share_native "
+                    "WHERE amount_per_share IS NULL AND dividend_per_share_native IS NOT NULL"
+                )
+            )
+        if div_cols and "dividend_per_share_native" not in div_cols:
+            conn.execute(text("ALTER TABLE dividend_events ADD COLUMN dividend_per_share_native NUMERIC(24,10)"))
+            if "amount_per_share" in div_cols:
+                conn.execute(
+                    text(
+                        "UPDATE dividend_events SET dividend_per_share_native = amount_per_share "
+                        "WHERE dividend_per_share_native IS NULL"
+                    )
+                )
+        conn.execute(
+            text(
+                "UPDATE dividend_events SET amount_per_share = dividend_per_share_native "
+                "WHERE amount_per_share IS NULL AND dividend_per_share_native IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_dividend_events_ticker_ex_amount "
+                "ON dividend_events (ticker, ex_date, dividend_per_share_native)"
+            )
+        )
+
+
+_ensure_phase14_schema()
 
 
 @app.on_event("startup")
@@ -591,6 +652,8 @@ class PortfolioSettingsUpdateRequest(BaseModel):
     cash_management_mode: str | None = None
     include_dividends_in_performance: bool | None = None
     reinvest_dividends_overlay: bool | None = None
+    apply_dividend_withholding: bool | None = None
+    dividend_withholding_percent: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +771,7 @@ def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(ge
         )
         try:
             backfill_fx_history_if_missing(payload.portfolio_id, db)
+            backfill_dividend_history_if_missing(payload.portfolio_id, db, strict=False)
             rebuild_equity_history(
                 db,
                 payload.portfolio_id,
@@ -717,6 +781,7 @@ def post_transaction(payload: TransactionCreateRequest, db: Session = Depends(ge
             )
         except PortfolioEngineError:
             backfill_fx_history_if_missing(payload.portfolio_id, db)
+            backfill_dividend_history_if_missing(payload.portfolio_id, db, strict=False)
             rebuild_equity_history(
                 db,
                 payload.portfolio_id,
@@ -744,6 +809,7 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
         )
         try:
             backfill_fx_history_if_missing(data["portfolio_id"], db)
+            backfill_dividend_history_if_missing(data["portfolio_id"], db, strict=False)
             rebuild_equity_history(
                 db,
                 data["portfolio_id"],
@@ -753,6 +819,7 @@ def put_transaction(transaction_id: str, payload: TransactionUpdateRequest, db: 
             )
         except PortfolioEngineError:
             backfill_fx_history_if_missing(data["portfolio_id"], db)
+            backfill_dividend_history_if_missing(data["portfolio_id"], db, strict=False)
             rebuild_equity_history(
                 db,
                 data["portfolio_id"],
@@ -791,6 +858,7 @@ def patch_transaction(transaction_id: str, payload: TransactionPatchRequest, db:
             currency=payload.currency,
         )
         backfill_fx_history_if_missing(data["portfolio_id"], db)
+        backfill_dividend_history_if_missing(data["portfolio_id"], db, strict=False)
         rebuild = rebuild_equity_history(
             db,
             data["portfolio_id"],
@@ -812,6 +880,7 @@ def delete_transaction(transaction_id: str, db: Session = Depends(get_db)):
     try:
         data = soft_delete_transaction(db, transaction_id)
         backfill_fx_history_if_missing(data["portfolio_id"], db)
+        backfill_dividend_history_if_missing(data["portfolio_id"], db, strict=False)
         rebuild = rebuild_equity_history(
             db,
             data["portfolio_id"],
@@ -1052,6 +1121,7 @@ def post_rebuild_equity_history_for_portfolio(
 ):
     try:
         backfill_fx_history_if_missing(portfolio_id, db)
+        backfill_dividend_history_if_missing(portfolio_id, db, strict=bool(strict))
         data = rebuild_equity_history(
             db,
             portfolio_id,
@@ -1096,6 +1166,8 @@ def update_portfolio_settings_route(
             cash_management_mode=payload.cash_management_mode,
             include_dividends_in_performance=payload.include_dividends_in_performance,
             reinvest_dividends_overlay=payload.reinvest_dividends_overlay,
+            apply_dividend_withholding=payload.apply_dividend_withholding,
+            dividend_withholding_percent=payload.dividend_withholding_percent,
         )
     except PortfolioEngineError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

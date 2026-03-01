@@ -259,6 +259,8 @@ class Portfolio(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, index=True)
     base_currency: Mapped[str] = mapped_column(String, nullable=False, default="USD")
+    apply_dividend_withholding: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    dividend_withholding_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     owner_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
@@ -557,6 +559,7 @@ class TickerMetadata(Base):
 class DividendEvent(Base):
     __tablename__ = "dividend_events"
     __table_args__ = (
+        UniqueConstraint("ticker", "ex_date", "dividend_per_share_native", name="uq_dividend_events_ticker_ex_amount"),
         UniqueConstraint("source_hash", name="uq_dividend_events_source_hash"),
     )
 
@@ -564,7 +567,9 @@ class DividendEvent(Base):
     ticker: Mapped[str] = mapped_column(String, nullable=False, index=True)
     ex_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
     pay_date: Mapped[Date] = mapped_column(Date, nullable=False, index=True)
-    amount_per_share: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
+    # Backward-compatibility for older SQLite schemas where amount_per_share is NOT NULL.
+    amount_per_share: Mapped[float | None] = mapped_column(Numeric(24, 10), nullable=True)
+    dividend_per_share_native: Mapped[float] = mapped_column(Numeric(24, 10), nullable=False)
     currency: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     source_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
