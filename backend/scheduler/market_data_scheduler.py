@@ -9,6 +9,7 @@ from backend.database import SessionLocal
 from backend.models import Portfolio
 from backend.orchestrator.portfolio_orchestrator import (
     PortfolioEngineError,
+    backfill_dividend_history_if_missing,
     create_portfolio_daily_snapshot,
     get_active_open_tickers,
     get_required_fx_pairs_for_open_positions,
@@ -144,6 +145,30 @@ def run_daily_snapshot_job(snapshot_date: date | None = None) -> dict[str, int]:
         db.close()
 
 
+def run_dividend_refresh_job() -> dict[str, int]:
+    db: Session = SessionLocal()
+    attempted = 0
+    refreshed = 0
+    try:
+        portfolios = (
+            db.query(Portfolio)
+            .filter(Portfolio.is_deleted == False)
+            .order_by(Portfolio.id.asc())
+            .all()
+        )
+        for p in portfolios:
+            attempted += 1
+            try:
+                out = backfill_dividend_history_if_missing(p.id, db, strict=False)
+                if int(out.get("inserted_rows", 0) or 0) > 0:
+                    refreshed += 1
+            except PortfolioEngineError:
+                continue
+        return {"attempted": attempted, "refreshed": refreshed}
+    finally:
+        db.close()
+
+
 def start_market_data_scheduler() -> None:
     global _scheduler
     if BackgroundScheduler is None:
@@ -161,6 +186,13 @@ def start_market_data_scheduler() -> None:
         hour=21,
         minute=20,
         id="phase12a_daily_snapshot",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_dividend_refresh_job,
+        "interval",
+        days=15,
+        id="phase14_dividend_refresh",
         replace_existing=True,
     )
     scheduler.start()
