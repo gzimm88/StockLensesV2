@@ -170,6 +170,61 @@ def test_fx_impact_separated_for_native_currency_holding():
     assert row["fx_impact_value"] != 0.0
 
 
+def test_avg_cost_native_does_not_double_convert_legacy_mismatch():
+    db = _make_session()
+    portfolio_id = _seed_portfolio(db, name="AvgCostLegacyMismatch")
+    d0 = date.today() - timedelta(days=3)
+    d1 = date.today() - timedelta(days=2)
+
+    _seed_fx(db, "EUR", d0, 1.1365)
+    _seed_fx(db, "EUR", d1, 1.1365)
+    _seed_legacy_price(db, "ASML", d0, 1200.0)
+    _seed_legacy_price(db, "ASML", d1, 1206.0)
+
+    shares = 167.8532
+    local_price = 610.90
+    # Legacy mismatch case: transaction persisted with USD currency label and base amount.
+    db.add(
+        PortfolioTransaction(
+            id=str(uuid.uuid4()),
+            portfolio_id=portfolio_id,
+            security_id=None,
+            ticker_symbol_raw="ENXTAM:ASML",
+            ticker_symbol_normalized="ASML",
+            tx_type="Buy",
+            trade_date=d0,
+            shares=shares,
+            price=local_price,
+            gross_amount=shares * local_price,
+            fx_at_execution=1.0,
+            gross_amount_base=102538.55,
+            is_generated=False,
+            generated_event_id=None,
+            currency="USD",
+            metadata_json=None,
+            source="legacy-import",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            deleted_at=None,
+            version=1,
+            is_deleted=False,
+        )
+    )
+    db.commit()
+
+    rebuild_equity_history(db, portfolio_id, mode="full", force=True, strict=True, to_date=d1)
+    holdings = get_portfolio_holdings(db, portfolio_id)
+    assert len(holdings["holdings"]) == 1
+    row = holdings["holdings"][0]
+    assert row["ticker"] == "ASML"
+    assert row["native_currency"] == "EUR"
+    assert abs(row["avg_cost_basis_native"] - 610.90) < 0.01
+    # Structural guard: base total must be derived from native notional * execution-date FX,
+    # not from legacy persisted gross_amount_base when the row was mislabeled as USD.
+    expected_total_cost_base = shares * local_price * 1.1365
+    assert abs(row["total_cost_basis"] - expected_total_cost_base) < 0.05
+
+
 def test_price_fallback_uses_legacy_prices_when_price_history_empty():
     db = _make_session()
     portfolio_id = _seed_portfolio(db, name="LegacyFallback")

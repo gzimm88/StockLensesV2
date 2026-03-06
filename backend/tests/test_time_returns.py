@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
 from backend.main import app
-from backend.models import Portfolio, PortfolioEquityHistoryRow
+from backend.models import Portfolio, PortfolioEquityHistoryRow, PortfolioSettings
 
 
 def _build_client() -> tuple[TestClient, sessionmaker]:
@@ -174,6 +174,52 @@ def test_time_returns_deterministic_rerun_same_response():
         first = _get_time_returns(client, portfolio_id)
         second = _get_time_returns(client, portfolio_id)
         assert first == second
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_time_returns_uses_twr_when_cash_ignored():
+    client, SessionLocal = _build_client()
+    db: Session = SessionLocal()
+    try:
+        portfolio_id = _seed_portfolio(db, name="TimeReturnsTWR")
+        db.add(
+            PortfolioSettings(
+                id=str(uuid.uuid4()),
+                portfolio_id=portfolio_id,
+                strict_mode=False,
+                cash_management_mode="ignore_cash",
+                include_dividends_in_performance=True,
+                reinvest_dividends_overlay=False,
+                version=1,
+                is_deleted=False,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+        # Equity doubles (e.g. with contributions), but TWR is only +20%.
+        _seed_equity_rows(
+            db,
+            portfolio_id,
+            [
+                (date(2026, 1, 2), 100.0),
+                (date(2026, 2, 10), 200.0),
+            ],
+        )
+        rows = (
+            db.query(PortfolioEquityHistoryRow)
+            .filter(PortfolioEquityHistoryRow.portfolio_id == portfolio_id)
+            .order_by(PortfolioEquityHistoryRow.date.asc())
+            .all()
+        )
+        rows[0].twr_index = 1.0
+        rows[1].twr_index = 1.2
+        db.commit()
+
+        data = _get_time_returns(client, portfolio_id)
+        assert data["since_inception_return_pct"] == 20.0
     finally:
         db.close()
         app.dependency_overrides.clear()
