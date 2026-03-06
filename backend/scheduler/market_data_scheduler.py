@@ -67,7 +67,7 @@ def _fetch_latest_fx_from_yahoo(base_currency: str, quote_currency: str) -> floa
 def run_price_fetch_job(now_utc: datetime | None = None) -> dict[str, int]:
     ts = _bucket_20m(now_utc or datetime.now(timezone.utc))
     if not _within_us_market_hours(ts):
-        return {"attempted": 0, "inserted": 0}
+        return {"attempted": 0, "inserted": 0, "fx_attempted": 0, "fx_inserted": 0}
 
     db: Session = SessionLocal()
     attempted = 0
@@ -88,7 +88,13 @@ def run_price_fetch_job(now_utc: datetime | None = None) -> dict[str, int]:
                 source="yahoo_scheduler",
             ):
                 inserted += 1
-        return {"attempted": attempted, "inserted": inserted}
+        fx_result = run_fx_fetch_job(ts)
+        return {
+            "attempted": attempted,
+            "inserted": inserted,
+            "fx_attempted": int(fx_result.get("attempted", 0)),
+            "fx_inserted": int(fx_result.get("inserted", 0)),
+        }
     finally:
         db.close()
 

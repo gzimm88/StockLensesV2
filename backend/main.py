@@ -71,6 +71,7 @@ from backend.orchestrator.portfolio_orchestrator import (
     load_last_portfolio_run,
     rebuild_position_ledger,
     rebuild_equity_history,
+    refresh_market_data_for_portfolio,
     rebuild_valuation_snapshot,
     run_portfolio_creation_flow,
     soft_delete_corporate_action,
@@ -1136,6 +1137,22 @@ def post_rebuild_equity_history_for_portfolio(
     return PortfolioProcessResponse(
         ok=True,
         message="Portfolio equity history rebuilt",
+        data=data,
+    )
+
+
+@app.post("/portfolios/{portfolio_id}/refresh-prices", response_model=PortfolioProcessResponse)
+async def refresh_portfolio_prices_route(
+    portfolio_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        data = await refresh_market_data_for_portfolio(db, portfolio_id)
+    except PortfolioEngineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PortfolioProcessResponse(
+        ok=True,
+        message="Portfolio market data refreshed",
         data=data,
     )
 

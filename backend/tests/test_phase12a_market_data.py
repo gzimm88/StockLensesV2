@@ -104,6 +104,8 @@ def test_scheduler_price_job_idempotent(monkeypatch):
     monkeypatch.setattr(market_data_scheduler, "SessionLocal", SessionLocal)
     monkeypatch.setattr(market_data_scheduler, "get_active_open_tickers", lambda db: ["AAPL"])
     monkeypatch.setattr(market_data_scheduler, "_fetch_latest_price_from_yahoo", lambda ticker: 123.45)
+    monkeypatch.setattr(market_data_scheduler, "get_required_fx_pairs_for_open_positions", lambda db: [("USD", "EUR")])
+    monkeypatch.setattr(market_data_scheduler, "_fetch_latest_fx_from_yahoo", lambda base, quote: 1.1)
 
     run_ts = datetime(2026, 1, 5, 15, 31, tzinfo=timezone.utc)
     first = market_data_scheduler.run_price_fetch_job(run_ts)
@@ -111,10 +113,14 @@ def test_scheduler_price_job_idempotent(monkeypatch):
 
     db = SessionLocal()
     try:
-        count = db.query(PriceHistory).count()
+        price_count = db.query(PriceHistory).count()
+        fx_count = db.query(FXRate).count()
         assert first["inserted"] == 1
         assert second["inserted"] == 0
-        assert count == 1
+        assert first["fx_inserted"] == 1
+        assert second["fx_inserted"] == 0
+        assert price_count == 1
+        assert fx_count == 1
     finally:
         db.close()
 

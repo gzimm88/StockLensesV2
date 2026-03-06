@@ -13,8 +13,9 @@ from bisect import bisect_right
 from decimal import Decimal, ROUND_HALF_UP
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone, time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy.orm import Session
@@ -64,6 +65,11 @@ _LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER
 _DECIMAL_MONEY_SCALE = Decimal("0.0000000001")
 _DECIMAL_RATE_SCALE = Decimal("0.000000000001")
 _EQUITY_ENGINE_VERSION = "phase14-v1"
+<<<<<<< HEAD
+_US_MARKET_EXCHANGES = {"NYSE", "NASDAQ", "NASDAQGS", "NASDAQGM", "NASDAQCM", "AMEX", "BATS", "ARCA"}
+_EU_MARKET_EXCHANGES = {"ENXTAM", "ENXTPA", "XPAR", "AMS"}
+=======
+>>>>>>> origin/main
 
 _EXCHANGE_NATIVE_CCY: dict[str, str] = {
     "NYSE": "USD",
@@ -459,6 +465,459 @@ def _iter_calendar_days(start_date: date, end_date: date):
     while d <= end_date:
         yield d
         d += timedelta(days=1)
+
+
+async def refresh_market_data_for_portfolio(db: Session, portfolio_id: str) -> dict[str, object]:
+    """
+    Refresh persisted market data inputs for open positions.
+    This does not run valuation/rebuild; it only refreshes stored price/FX/dividend inputs.
+    """
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    tx_rows = _sorted_active_transactions_for_window(db, portfolio_id, include_generated=False)
+    if not tx_rows:
+        return {
+            "portfolio_id": portfolio_id,
+            "portfolio_name": portfolio.name,
+            "requested_tickers": [],
+            "fetched_tickers": [],
+            "already_covered_tickers": [],
+            "fx_backfill": backfill_fx_history_if_missing(portfolio_id, db),
+            "dividend_backfill": backfill_dividend_history_if_missing(portfolio_id, db, strict=False),
+        }
+
+    _ensure_ticker_metadata_from_transactions(db, tx_rows)
+    db.commit()
+
+    by_ticker: dict[str, dict[str, object]] = {}
+    for r in tx_rows:
+        ticker = (r.ticker_symbol_normalized or "").strip().upper()
+        if not ticker:
+            continue
+        row = by_ticker.setdefault(
+            ticker,
+            {
+                "first_trade_date": r.trade_date,
+                "net_shares": Decimal("0"),
+                "source_symbol": (r.ticker_symbol_raw or ticker),
+            },
+        )
+        if r.trade_date < row["first_trade_date"]:
+            row["first_trade_date"] = r.trade_date
+        shares = _to_decimal(r.shares)
+        tx_type = (r.tx_type or "").strip().upper()
+        if tx_type == "BUY":
+            row["net_shares"] = _to_decimal(row["net_shares"]) + shares
+        elif tx_type == "SELL":
+            row["net_shares"] = _to_decimal(row["net_shares"]) - shares
+
+    open_tickers = sorted([t for t, s in by_ticker.items() if _to_decimal(s["net_shares"]) > Decimal("0")])
+    if not open_tickers:
+        return {
+            "portfolio_id": portfolio_id,
+            "portfolio_name": portfolio.name,
+            "requested_tickers": [],
+            "fetched_tickers": [],
+            "already_covered_tickers": [],
+            "fx_backfill": backfill_fx_history_if_missing(portfolio_id, db),
+            "dividend_backfill": backfill_dividend_history_if_missing(portfolio_id, db, strict=False),
+        }
+
+    ticker_start_dates = {t: by_ticker[t]["first_trade_date"] for t in open_tickers}
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
+    base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+    earliest = min(ticker_start_dates.values())
+    today_utc = datetime.now(timezone.utc).date()
+    refresh_start = max(earliest, today_utc - timedelta(days=14))
+    coverage = await ensure_price_coverage(
+        db,
+        open_tickers,
+        earliest,
+        ticker_start_dates=ticker_start_dates,
+        ticker_source_symbols={t: str(by_ticker[t]["source_symbol"]) for t in open_tickers},
+    )
+    refreshed_tickers: list[str] = list(coverage.fetched_tickers)
+    live_refreshed_tickers: list[str] = []
+    closed_market_tickers: list[str] = []
+    live_fx_refreshed_pairs: list[str] = []
+    closed_market_fx_pairs: list[str] = []
+    refresh_warnings: list[str] = []
+
+    def _latest_intraday_quotes(symbols: list[str]) -> tuple[dict[str, tuple[datetime, float]], dict[str, tuple[date, float]]]:
+        import yfinance as yf
+
+        if not symbols:
+            return {}, {}
+        symbol_list = sorted(set(symbols))
+        quotes: dict[str, tuple[datetime, float]] = {}
+        prev_closes: dict[str, tuple[date, float]] = {}
+        try:
+            hist = yf.download(
+                tickers=" ".join(symbol_list),
+                period="5d",
+                interval="5m",
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=False,
+            )
+        except Exception:
+            return {}, {}
+        if hist is None or hist.empty:
+            return {}, {}
+
+        def _normalize_timestamp(ts_value) -> datetime | None:
+            if ts_value is None:
+                return None
+            if hasattr(ts_value, "to_pydatetime"):
+                ts = ts_value.to_pydatetime()
+            elif isinstance(ts_value, datetime):
+                ts = ts_value
+            else:
+                return None
+            if ts.tzinfo is not None:
+                return ts.astimezone(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+            return ts.replace(second=0, microsecond=0)
+
+        try:
+            columns = list(hist.columns)
+        except Exception:
+            return {}, {}
+
+        is_multi = bool(columns and hasattr(columns[0], "__len__") and not isinstance(columns[0], str))
+
+        if is_multi:
+            for symbol in symbol_list:
+                try:
+                    frame = hist[symbol]
+                except Exception:
+                    continue
+                if frame is None or frame.empty or "Close" not in frame.columns:
+                    continue
+                close_series = frame["Close"].dropna()
+                if close_series.empty:
+                    continue
+                ts_utc = _normalize_timestamp(close_series.index[-1])
+                if ts_utc is None:
+                    continue
+                try:
+                    quotes[symbol] = (ts_utc, float(close_series.iloc[-1]))
+                except Exception:
+                    continue
+                try:
+                    daily_last = close_series.groupby(close_series.index.date).last()
+                    latest_day = ts_utc.date()
+                    prev_days = [d for d in daily_last.index if d < latest_day]
+                    if prev_days:
+                        prev_day = max(prev_days)
+                        prev_closes[symbol] = (prev_day, float(daily_last.loc[prev_day]))
+                except Exception:
+                    pass
+            return quotes, prev_closes
+
+        if "Close" not in hist.columns:
+            return {}, {}
+        close_series = hist["Close"].dropna()
+        if close_series.empty:
+            return {}, {}
+        ts_utc = _normalize_timestamp(close_series.index[-1])
+        if ts_utc is None:
+            return {}, {}
+        try:
+            quotes[symbol_list[0]] = (ts_utc, float(close_series.iloc[-1]))
+        except Exception:
+            return {}, {}
+        try:
+            daily_last = close_series.groupby(close_series.index.date).last()
+            latest_day = ts_utc.date()
+            prev_days = [d for d in daily_last.index if d < latest_day]
+            if prev_days:
+                prev_day = max(prev_days)
+                prev_closes[symbol_list[0]] = (prev_day, float(daily_last.loc[prev_day]))
+        except Exception:
+            pass
+        return quotes, prev_closes
+
+    def _latest_intraday_fx(
+        quote_currencies: list[str],
+        *,
+        base_currency: str,
+    ) -> tuple[dict[str, tuple[datetime, float]], dict[str, tuple[date, float]]]:
+        import yfinance as yf
+
+        quotes = sorted(
+            {
+                (q or "").strip().upper()
+                for q in quote_currencies
+                if (q or "").strip().upper() and (q or "").strip().upper() != base_currency
+            }
+        )
+        if not quotes:
+            return {}, {}
+        symbols = [f"{q}{base_currency}=X" for q in quotes]
+        latest_by_quote: dict[str, tuple[datetime, float]] = {}
+        prev_by_quote: dict[str, tuple[date, float]] = {}
+        prev_close_cutoff_time = dt_time(16, 30)
+
+        def _pick_prev_session_close(
+            close_series,
+            prev_day: date,
+        ) -> float | None:
+            try:
+                day_points = []
+                for idx, value in close_series.items():
+                    if value is None:
+                        continue
+                    point_date = idx.date()
+                    if point_date != prev_day:
+                        continue
+                    point_time = idx.time()
+                    day_points.append((point_time, float(value)))
+                if not day_points:
+                    return None
+                day_points.sort(key=lambda item: item[0])
+                at_or_before_cutoff = [v for t, v in day_points if t <= prev_close_cutoff_time]
+                if at_or_before_cutoff:
+                    return at_or_before_cutoff[-1]
+                return day_points[-1][1]
+            except Exception:
+                return None
+
+        def _fallback_prev_close(symbol: str, latest_day: date | None) -> tuple[date, float] | None:
+            try:
+                daily = yf.Ticker(symbol).history(
+                    period="10d",
+                    interval="1d",
+                    auto_adjust=False,
+                    actions=False,
+                )
+            except Exception:
+                return None
+            if daily is None or daily.empty or "Close" not in daily.columns:
+                return None
+            close_series = daily["Close"].dropna()
+            if close_series.empty:
+                return None
+            try:
+                ordered = sorted(
+                    [(idx.date(), float(v)) for idx, v in close_series.items() if v is not None],
+                    key=lambda x: x[0],
+                )
+            except Exception:
+                return None
+            if not ordered:
+                return None
+            if latest_day is not None:
+                candidates = [row for row in ordered if row[0] < latest_day]
+                if candidates:
+                    return candidates[-1]
+            # fallback: use the latest available daily close
+            return ordered[-1]
+
+        try:
+            hist = yf.download(
+                tickers=" ".join(symbols),
+                period="5d",
+                interval="5m",
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=False,
+            )
+        except Exception:
+            return {}, {}
+        if hist is None or hist.empty:
+            return {}, {}
+
+        def _normalize_timestamp(ts_value) -> datetime | None:
+            if ts_value is None:
+                return None
+            if hasattr(ts_value, "to_pydatetime"):
+                ts = ts_value.to_pydatetime()
+            elif isinstance(ts_value, datetime):
+                ts = ts_value
+            else:
+                return None
+            if ts.tzinfo is not None:
+                return ts.astimezone(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+            return ts.replace(second=0, microsecond=0)
+
+        try:
+            columns = list(hist.columns)
+        except Exception:
+            return {}, {}
+        is_multi = bool(columns and hasattr(columns[0], "__len__") and not isinstance(columns[0], str))
+
+        if is_multi:
+            for quote, symbol in zip(quotes, symbols):
+                try:
+                    frame = hist[symbol]
+                except Exception:
+                    continue
+                if frame is None or frame.empty or "Close" not in frame.columns:
+                    continue
+                close_series = frame["Close"].dropna()
+                if close_series.empty:
+                    continue
+                ts_utc = _normalize_timestamp(close_series.index[-1])
+                if ts_utc is None:
+                    continue
+                try:
+                    latest_by_quote[quote] = (ts_utc, float(close_series.iloc[-1]))
+                except Exception:
+                    continue
+                try:
+                    daily_last = close_series.groupby(close_series.index.date).last()
+                    latest_day = ts_utc.date()
+                    prev_days = [d for d in daily_last.index if d < latest_day]
+                    if prev_days:
+                        prev_day = max(prev_days)
+                        session_prev = _pick_prev_session_close(close_series, prev_day)
+                        if session_prev is not None:
+                            prev_by_quote[quote] = (prev_day, float(session_prev))
+                        else:
+                            prev_by_quote[quote] = (prev_day, float(daily_last.loc[prev_day]))
+                except Exception:
+                    pass
+                if quote not in prev_by_quote:
+                    fallback_prev = _fallback_prev_close(symbol, ts_utc.date())
+                    if fallback_prev is not None:
+                        prev_by_quote[quote] = fallback_prev
+            return latest_by_quote, prev_by_quote
+
+        if "Close" not in hist.columns or len(quotes) != 1:
+            return {}, {}
+        close_series = hist["Close"].dropna()
+        if close_series.empty:
+            return {}, {}
+        ts_utc = _normalize_timestamp(close_series.index[-1])
+        if ts_utc is None:
+            return {}, {}
+        quote = quotes[0]
+        try:
+            latest_by_quote[quote] = (ts_utc, float(close_series.iloc[-1]))
+        except Exception:
+            return {}, {}
+        try:
+            daily_last = close_series.groupby(close_series.index.date).last()
+            latest_day = ts_utc.date()
+            prev_days = [d for d in daily_last.index if d < latest_day]
+            if prev_days:
+                prev_day = max(prev_days)
+                session_prev = _pick_prev_session_close(close_series, prev_day)
+                if session_prev is not None:
+                    prev_by_quote[quote] = (prev_day, float(session_prev))
+                else:
+                    prev_by_quote[quote] = (prev_day, float(daily_last.loc[prev_day]))
+        except Exception:
+            pass
+        if quote not in prev_by_quote:
+            fallback_prev = _fallback_prev_close(symbols[0], ts_utc.date())
+            if fallback_prev is not None:
+                prev_by_quote[quote] = fallback_prev
+        return latest_by_quote, prev_by_quote
+
+    fetch_symbols_by_ticker: dict[str, str] = {}
+    for ticker in open_tickers:
+        fetch_symbol, map_warning = _to_fetch_symbol(
+            ticker,
+            str(by_ticker[ticker]["source_symbol"]),
+        )
+        fetch_symbols_by_ticker[ticker] = fetch_symbol
+        if map_warning:
+            refresh_warnings.append(map_warning)
+            logger.warning("[PortfolioRefresh] %s", map_warning)
+
+    live_quotes, prev_session_closes = _latest_intraday_quotes(list(fetch_symbols_by_ticker.values()))
+    for ticker in open_tickers:
+        fetch_symbol = fetch_symbols_by_ticker.get(ticker)
+        latest_live = live_quotes.get(fetch_symbol) if fetch_symbol else None
+        if latest_live is None:
+            closed_market_tickers.append(ticker)
+            continue
+        ts_utc, px_live = latest_live
+        if ts_utc.date() != today_utc:
+            closed_market_tickers.append(ticker)
+            continue
+        if insert_price_history_point(
+            db,
+            ticker=ticker,
+            datetime_utc=ts_utc,
+            price=px_live,
+            adjusted_price=None,
+            source="yahoo_live_refresh",
+        ):
+            live_refreshed_tickers.append(ticker)
+        prev_close = prev_session_closes.get(fetch_symbol) if fetch_symbol else None
+        if prev_close is not None:
+            prev_day, prev_px = prev_close
+            prev_ts = datetime(prev_day.year, prev_day.month, prev_day.day, 20, 0, 0)
+            insert_price_history_point(
+                db,
+                ticker=ticker,
+                datetime_utc=prev_ts,
+                price=prev_px,
+                adjusted_price=None,
+                source="yahoo_prev_close_refresh",
+            )
+
+    fx_quotes, fx_prev_closes = _latest_intraday_fx(
+        [ticker_currency.get(t, base_currency) for t in open_tickers],
+        base_currency=base_currency,
+    )
+    for quote_ccy in sorted({(ticker_currency.get(t, base_currency) or "").strip().upper() for t in open_tickers}):
+        if not quote_ccy or quote_ccy == base_currency:
+            continue
+        latest_fx = fx_quotes.get(quote_ccy)
+        if latest_fx is None:
+            closed_market_fx_pairs.append(f"{quote_ccy}->{base_currency}")
+            continue
+        ts_utc, fx_live = latest_fx
+        if ts_utc.date() != today_utc:
+            closed_market_fx_pairs.append(f"{quote_ccy}->{base_currency}")
+            continue
+        if insert_fx_rate_point(
+            db,
+            base_currency=base_currency,
+            quote_currency=quote_ccy,
+            datetime_utc=ts_utc,
+            rate=fx_live,
+            source="yahoo_live_refresh",
+        ):
+            live_fx_refreshed_pairs.append(f"{quote_ccy}->{base_currency}")
+        prev_fx = fx_prev_closes.get(quote_ccy)
+        if prev_fx is not None:
+            prev_day, prev_rate = prev_fx
+            # Store explicit prior-session FX close at EU close anchor time so
+            # day-change baseline can prefer session-close FX vs end-of-day rows.
+            prev_ts = datetime(prev_day.year, prev_day.month, prev_day.day, 16, 30, 0)
+            insert_fx_rate_point(
+                db,
+                base_currency=base_currency,
+                quote_currency=quote_ccy,
+                datetime_utc=prev_ts,
+                rate=prev_rate,
+                source="yahoo_prev_close_refresh",
+            )
+    fx_backfill = backfill_fx_history_if_missing(portfolio_id, db, to_date_override=today_utc)
+    dividend_backfill = backfill_dividend_history_if_missing(portfolio_id, db, strict=False)
+    return {
+        "portfolio_id": portfolio_id,
+        "portfolio_name": portfolio.name,
+        "requested_tickers": coverage.requested_tickers,
+        "fetched_tickers": coverage.fetched_tickers,
+        "already_covered_tickers": coverage.already_covered_tickers,
+        "coverage_start": coverage.coverage_start.isoformat(),
+        "coverage_end": coverage.coverage_end.isoformat(),
+        "warnings": [*coverage.warnings, *refresh_warnings],
+        "refreshed_tickers": refreshed_tickers,
+        "live_refreshed_tickers": sorted(set(live_refreshed_tickers)),
+        "closed_market_tickers": sorted(set(closed_market_tickers)),
+        "live_fx_refreshed_pairs": sorted(set(live_fx_refreshed_pairs)),
+        "closed_market_fx_pairs": sorted(set(closed_market_fx_pairs)),
+        "refresh_start": refresh_start.isoformat(),
+        "fx_backfill": fx_backfill,
+        "dividend_backfill": dividend_backfill,
+    }
 
 
 def _synthetic_prices_from_transactions(
@@ -1182,6 +1641,8 @@ def list_transactions_for_portfolio(db: Session, portfolio_id: str) -> list[dict
                 "type": r.tx_type.upper(),
                 "quantity": float(r.shares),
                 "price": float(r.price),
+                "gross_amount_base": float(r.gross_amount_base or 0.0),
+                "fx_at_execution": float(r.fx_at_execution or 1.0),
                 "date": r.trade_date.isoformat(),
                 "currency": r.currency,
                 "version": int(r.version or 1),
@@ -1818,6 +2279,87 @@ def _ticker_currency_map_or_error(db: Session, portfolio_id: str) -> dict[str, s
             )
         out[ticker] = next(iter(values))
     return out
+
+
+def _ticker_exchange_map_or_none(db: Session, portfolio_id: str) -> dict[str, str]:
+    rows = _sorted_active_transactions(db, portfolio_id)
+    sample_raw: dict[str, str] = {}
+    tickers: list[str] = []
+    for r in rows:
+        ticker = (r.ticker_symbol_normalized or "").strip().upper()
+        if not ticker:
+            continue
+        if ticker not in sample_raw:
+            sample_raw[ticker] = r.ticker_symbol_raw
+            tickers.append(ticker)
+    if not tickers:
+        return {}
+    metadata_rows = (
+        db.query(TickerMetadata)
+        .filter(TickerMetadata.ticker_normalized.in_(tickers))
+        .all()
+    )
+    metadata_map = {
+        (m.ticker_normalized or "").strip().upper(): (m.exchange or "").strip().upper()
+        for m in metadata_rows
+        if m.ticker_normalized and m.exchange
+    }
+    out: dict[str, str] = {}
+    for ticker in tickers:
+        ex = metadata_map.get(ticker)
+        if ex:
+            out[ticker] = ex
+            continue
+        raw = sample_raw.get(ticker, ticker)
+        parsed = _parse_exchange_from_raw_ticker(raw)
+        if parsed:
+            out[ticker] = parsed
+    return out
+
+
+def _is_exchange_open_now(exchange: str | None, now_utc: datetime) -> bool:
+    ex = (exchange or "").strip().upper()
+    if not ex:
+        # If exchange is unknown, preserve legacy behavior and allow day-change
+        # calculation from available price history.
+        return True
+    if ex in _US_MARKET_EXCHANGES:
+        local = now_utc.astimezone(ZoneInfo("America/New_York"))
+        if local.weekday() >= 5:
+            return False
+        t = local.time()
+        return dt_time(9, 30) <= t <= dt_time(16, 0)
+    if ex in _EU_MARKET_EXCHANGES:
+        local = now_utc.astimezone(ZoneInfo("Europe/Amsterdam"))
+        if local.weekday() >= 5:
+            return False
+        t = local.time()
+        return dt_time(9, 0) <= t <= dt_time(17, 30)
+    return True
+
+
+def _previous_trading_day_for_exchange(exchange: str | None, ref_date: date) -> date:
+    d = ref_date - timedelta(days=1)
+    ex = (exchange or "").strip().upper()
+    # Weekend handling for supported exchanges; unknown defaults to weekday logic.
+    if ex in _US_MARKET_EXCHANGES or ex in _EU_MARKET_EXCHANGES or not ex:
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+    return d
+
+
+def _exchange_close_utc_naive(exchange: str | None, on_date: date) -> datetime:
+    ex = (exchange or "").strip().upper()
+    if ex in _US_MARKET_EXCHANGES:
+        local_tz = ZoneInfo("America/New_York")
+        local_dt = datetime(on_date.year, on_date.month, on_date.day, 16, 0, 0, tzinfo=local_tz)
+        return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    if ex in _EU_MARKET_EXCHANGES:
+        local_tz = ZoneInfo("Europe/Amsterdam")
+        local_dt = datetime(on_date.year, on_date.month, on_date.day, 17, 30, 0, tzinfo=local_tz)
+        return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    # Unknown exchange: preserve current behavior (end-of-day cutoff).
+    return datetime(on_date.year, on_date.month, on_date.day, 23, 59, 59)
 
 
 def _tx_share_deltas_in_window(
@@ -2595,6 +3137,8 @@ def _range_start_from_label(end_date: date, range_label: str) -> date | None:
     label = (range_label or "6M").strip().upper()
     if label in {"ALL", "MAX"}:
         return None
+    if label == "YTD":
+        return date(end_date.year, 1, 1)
     if label == "1D":
         return end_date - timedelta(days=1)
     if label == "5D":
@@ -2605,7 +3149,7 @@ def _range_start_from_label(end_date: date, range_label: str) -> date | None:
         return end_date - timedelta(days=30 * int(label[:-1]))
     if label.endswith("Y") and label[:-1].isdigit():
         return end_date - timedelta(days=365 * int(label[:-1]))
-    raise PortfolioEngineError(f"Unsupported range '{range_label}'. Use 1D, 5D, 1W, 1M, 3M, 6M, 1Y, 5Y, or ALL.")
+    raise PortfolioEngineError(f"Unsupported range '{range_label}'. Use 1D, 5D, 1W, 1M, 3M, 6M, YTD, 1Y, 5Y, or ALL.")
 
 
 def _sorted_active_transactions_for_window(
@@ -2657,12 +3201,50 @@ def _to_decimal(value: float | int | Decimal | None, *, scale: Decimal = _DECIMA
     return Decimal(str(float(value or 0.0))).quantize(scale, rounding=ROUND_HALF_UP)
 
 
-def _tx_base_amount(tx: PortfolioTransaction) -> Decimal:
-    if tx.gross_amount_base is not None:
-        return _to_decimal(tx.gross_amount_base)
+def _tx_base_amount(
+    tx: PortfolioTransaction,
+    *,
+    db: Session | None = None,
+    base_currency: str | None = None,
+    ticker_currency: dict[str, str] | None = None,
+) -> Decimal:
     gross = _to_decimal(tx.gross_amount)
-    fx = _to_decimal(tx.fx_at_execution if tx.fx_at_execution is not None else 1.0, scale=_DECIMAL_RATE_SCALE)
-    return (gross * fx).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    fx_exec = _to_decimal(tx.fx_at_execution if tx.fx_at_execution is not None else 1.0, scale=_DECIMAL_RATE_SCALE)
+    gross_base = _to_decimal(tx.gross_amount_base) if tx.gross_amount_base is not None else (
+        gross * fx_exec
+    ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    if db is None:
+        return gross_base
+
+    base = (base_currency or "").strip().upper()
+    if not base:
+        portfolio = db.query(Portfolio).filter(Portfolio.id == tx.portfolio_id).first()
+        base = ((portfolio.base_currency if portfolio else "USD") or "USD").strip().upper() or "USD"
+
+    tx_ticker = (tx.ticker_symbol_normalized or "").strip().upper()
+    native = ""
+    if ticker_currency is not None:
+        native = (ticker_currency.get(tx_ticker) or "").strip().upper()
+    if not native and tx_ticker:
+        md = db.query(TickerMetadata).filter(TickerMetadata.ticker_normalized == tx_ticker).first()
+        native = ((md.native_currency if md else "") or "").strip().upper()
+    native = native or base
+
+    stored_ccy = (tx.currency or base).strip().upper() or base
+    # Structural normalization for legacy-bad rows:
+    # non-base ticker persisted as base currency should still be valued as native
+    # currency at execution-date FX.
+    if native != base and stored_ccy == base:
+        fx_hist = _lookup_close_fx_rate(
+            db,
+            quote_currency=native,
+            base_currency=base,
+            on_date=tx.trade_date,
+        )
+        return (gross * fx_hist).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+
+    return gross_base
 
 
 def _canonical_settings_blob(settings: dict[str, object]) -> dict[str, object]:
@@ -3157,6 +3739,8 @@ def _apply_generated_dividend_transactions(
     events = _active_dividend_events_for_tickers(db, tickers=tickers, to_date=to_date)
     if not events:
         return
+    base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
 
     tx_by_date: dict[date, list[PortfolioTransaction]] = defaultdict(list)
     for tx in base_tx_rows:
@@ -3192,7 +3776,9 @@ def _apply_generated_dividend_transactions(
             if tx.tx_type == "Buy":
                 unit_base = Decimal("0")
                 if shares > Decimal("0"):
-                    unit_base = (_tx_base_amount(tx) / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+                    unit_base = (
+                        _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency) / shares
+                    ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
                     lots[ticker].append((shares, unit_base))
             elif tx.tx_type == "Sell":
                 remaining = shares
@@ -3475,6 +4061,9 @@ def _compute_holdings_state_upto(
     *,
     as_of_date: date,
 ) -> dict[str, dict[str, Decimal]]:
+    portfolio = get_portfolio_or_error(db, portfolio_id)
+    base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
     tx_rows = _sorted_active_transactions_for_window(db, portfolio_id, to_date=as_of_date)
     lots: dict[str, list[tuple[Decimal, Decimal]]] = defaultdict(list)
     closed_tickers: set[str] = set()
@@ -3482,7 +4071,7 @@ def _compute_holdings_state_upto(
     for tx in tx_rows:
         ticker = tx.ticker_symbol_normalized
         shares = _to_decimal(tx.shares)
-        gross_base = _tx_base_amount(tx)
+        gross_base = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
         if tx.tx_type == "Buy":
             if shares > Decimal("0"):
                 lots[ticker].append((shares, (gross_base / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)))
@@ -3767,7 +4356,11 @@ def rebuild_equity_history(
             for tx in tx_by_date.get(d, []):
                 ticker = tx.ticker_symbol_normalized
                 shares = _to_decimal(tx.shares)
+<<<<<<< HEAD
+                gross_base = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
+=======
                 gross_base = _tx_base_amount(tx)
+>>>>>>> origin/main
                 ticker_ccy = (ticker_currency.get(ticker) or base_currency).strip().upper() or base_currency
                 tx_local_notional = (shares * _to_decimal(tx.price)).quantize(
                     _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
@@ -4294,22 +4887,19 @@ def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str,
     if row is None:
         raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
     market_move_component = Decimal(str(float(row.market_return_component or 0.0)))
-    # Summary FX Impact should reflect deterministic portfolio-level FX attribution,
-    # not only the latest-day fx_return_component.
     currency_move_component = Decimal(str(float(row.fx_return_component or 0.0)))
-    try:
-        pb = compute_performance_breakdown(db, portfolio_id)
-        currency_move_component = _to_decimal(pb.get("fx_gain"))
-    except Exception:
-        # Keep latest-row value as fallback if breakdown cannot be computed.
-        pass
     holdings_state = _compute_holdings_state_upto(db, portfolio_id, as_of_date=row.date)
     open_tickers = sorted([t for t, s in holdings_state.items() if _to_decimal(s.get("quantity")) > Decimal("0")])
     last_prices_updated_at: str | None = None
+    today_utc = datetime.now(timezone.utc).date()
     if open_tickers:
         per_ticker_latest: dict[str, tuple[datetime, str]] = {}
         for ticker in open_tickers:
-            ts, source = _latest_price_timestamp_on_or_before(db, ticker=ticker, as_of_date=row.date)
+            ts, source = _latest_price_timestamp_on_or_before(
+                db,
+                ticker=ticker,
+                as_of_date=max(row.date, today_utc),
+            )
             if ts is not None:
                 per_ticker_latest[ticker] = (ts, source or "price_history")
         if per_ticker_latest:
@@ -4319,6 +4909,38 @@ def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str,
         else:
             last_prices_updated_at = "No price data"
 
+    day_change_value = Decimal(str(float(row.day_change_value)))
+    day_change_percent = Decimal(str(float(row.day_change_percent)))
+    try:
+        holdings_payload = get_portfolio_holdings(db, portfolio_id)
+        holdings_rows = holdings_payload.get("holdings") or []
+        if holdings_rows:
+            live_day_change = Decimal("0")
+            live_market_impact = Decimal("0")
+            live_fx_impact = Decimal("0")
+            for hr in holdings_rows:
+                live_day_change += _to_decimal(hr.get("day_change_value"))
+                live_market_impact += _to_decimal(hr.get("price_return_value"))
+                live_fx_impact += _to_decimal(hr.get("fx_return_value"))
+            market_move_component = live_market_impact.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            currency_move_component = live_fx_impact.quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            # Keep day change exactly aligned to its displayed components.
+            day_change_value = (market_move_component + currency_move_component).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+            prior_equity = (_to_decimal(row.total_equity) - day_change_value).quantize(
+                _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+            )
+            if prior_equity != Decimal("0"):
+                day_change_percent = ((day_change_value / prior_equity) * Decimal("100")).quantize(
+                    _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
+                )
+            else:
+                day_change_percent = Decimal("0").quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    except Exception:
+        # Keep persisted snapshot day change as fallback.
+        pass
+
     return {
         "portfolio_id": portfolio_id,
         "as_of": row.date.isoformat(),
@@ -4326,8 +4948,8 @@ def get_portfolio_dashboard_summary(db: Session, portfolio_id: str) -> dict[str,
         "cash_balance": float(row.cash_balance),
         "cost_basis_total": float(row.cost_basis_total),
         "market_value_total": float(row.market_value_total),
-        "day_change_value": float(row.day_change_value),
-        "day_change_percent": float(row.day_change_percent),
+        "day_change_value": float(day_change_value),
+        "day_change_percent": float(day_change_percent),
         "unrealized_gain_value": float(row.unrealized_gain_value),
         "unrealized_gain_percent": float(
             Decimal("0")
@@ -4350,16 +4972,15 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
     if latest_equity is None:
         raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
     as_of = latest_equity.date
-    prev_rows = _resolve_latest_equity_rows(db, portfolio_id)
-    prev_date = None
-    for r in prev_rows:
-        if r.date < as_of:
-            prev_date = r.date
+    today_utc = datetime.now(timezone.utc).date()
+    query_as_of = max(as_of, today_utc)
+    now_utc = datetime.now(timezone.utc)
     base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
 
     state = _compute_holdings_state_upto(db, portfolio_id, as_of_date=as_of)
     lot_basis = _open_lot_basis_details_upto(db, portfolio_id, as_of_date=as_of)
     ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
+    ticker_exchange = _ticker_exchange_map_or_none(db, portfolio_id)
     ytd_start = date(as_of.year, 1, 1)
     dividend_tx_rows = (
         db.query(PortfolioTransaction)
@@ -4376,7 +4997,7 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
     dividends_ytd_by_ticker: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for dtx in dividend_tx_rows:
         ticker_key = dtx.ticker_symbol_normalized
-        amount = _tx_base_amount(dtx)
+        amount = _tx_base_amount(dtx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
         dividends_total_by_ticker[ticker_key] = (
             dividends_total_by_ticker[ticker_key] + amount
         ).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
@@ -4390,62 +5011,112 @@ def get_portfolio_holdings(db: Session, portfolio_id: str) -> dict[str, object]:
         if qty <= Decimal("0"):
             continue
         ccy = ticker_currency.get(ticker, base_currency)
-        # Primary path: persisted phase-12 market data tables.
-        px_today = _latest_price_on_or_before(db, ticker=ticker, as_of_date=as_of)
-        fx_today = _latest_fx_rate_on_or_before(db, base_currency=base_currency, quote_currency=ccy, as_of_date=as_of)
-        # Backward-compatible fallback for portfolios still backed by legacy daily history.
-        if px_today is None:
-            px_today_row = (
-                db.query(PricesHistory)
-                .filter(PricesHistory.ticker == ticker, PricesHistory.date == as_of)
+        # For current-day holdings, use latest persisted points up to "now" (UTC),
+        # not end-of-day rows, so day-change and FX reflect live refresh correctly.
+        if query_as_of == today_utc:
+            as_of_dt = now_utc.replace(tzinfo=None)
+            px_row = (
+                db.query(PriceHistory)
+                .filter(
+                    PriceHistory.ticker == ticker,
+                    PriceHistory.datetime_utc <= as_of_dt,
+                )
+                .order_by(PriceHistory.datetime_utc.desc(), PriceHistory.id.desc())
                 .first()
             )
-            if px_today_row is not None:
-                px_today = _to_decimal(px_today_row.close)
-        if fx_today is None:
-            try:
-                fx_today = _lookup_close_fx_rate(db, quote_currency=ccy, base_currency=base_currency, on_date=as_of)
-            except PortfolioEngineError:
-                fx_today = None
-        if px_today is None or fx_today is None:
+            if px_row is not None and px_row.price is not None and px_row.datetime_utc is not None:
+                px_today = _to_decimal(px_row.price, scale=_DECIMAL_MONEY_SCALE)
+                px_date = px_row.datetime_utc.date()
+            else:
+                px_today, px_date = _latest_price_point_on_or_before(
+                    db,
+                    ticker=ticker,
+                    as_of_date=query_as_of,
+                )
+
+            fx_row = (
+                db.query(FXRate)
+                .filter(
+                    FXRate.base_currency == base_currency,
+                    FXRate.quote_currency == ccy,
+                    FXRate.datetime_utc <= as_of_dt,
+                )
+                .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+                .first()
+            )
+            if fx_row is not None and fx_row.rate is not None and fx_row.datetime_utc is not None:
+                fx_today = _to_decimal(fx_row.rate, scale=_DECIMAL_RATE_SCALE)
+                fx_date = fx_row.datetime_utc.date()
+            else:
+                fx_today, fx_date = _latest_fx_rate_point_on_or_before(
+                    db,
+                    base_currency=base_currency,
+                    quote_currency=ccy,
+                    as_of_date=query_as_of,
+                )
+        else:
+            # Historical holdings snapshot uses end-of-day lookup.
+            px_today, px_date = _latest_price_point_on_or_before(db, ticker=ticker, as_of_date=query_as_of)
+            fx_today, fx_date = _latest_fx_rate_point_on_or_before(
+                db,
+                base_currency=base_currency,
+                quote_currency=ccy,
+                as_of_date=query_as_of,
+            )
+        if px_today is None or fx_today is None or px_date is None or fx_date is None:
             continue
         market_value_native = (qty * px_today).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
         market_price_base = (px_today * fx_today).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
         market_value = (market_value_native * fx_today).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
 
         prev_value = None
-        prev_native_value = None
         px_prev = None
         fx_prev = None
-        if prev_date is not None:
-            px_prev = _latest_price_on_or_before(db, ticker=ticker, as_of_date=prev_date)
-            fx_prev = _latest_fx_rate_on_or_before(db, base_currency=base_currency, quote_currency=ccy, as_of_date=prev_date)
-            if px_prev is None:
-                px_prev_row = (
-                    db.query(PricesHistory)
-                    .filter(PricesHistory.ticker == ticker, PricesHistory.date == prev_date)
-                    .first()
-                )
-                if px_prev_row is not None:
-                    px_prev = _to_decimal(px_prev_row.close)
-            if fx_prev is None:
-                try:
-                    fx_prev = _lookup_close_fx_rate(
-                        db,
-                        quote_currency=ccy,
-                        base_currency=base_currency,
-                        on_date=prev_date,
-                    )
-                except PortfolioEngineError:
-                    fx_prev = None
-            if px_prev is not None and fx_prev is not None:
-                prev_native_value = (qty * px_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
-                prev_value = (prev_native_value * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+        exchange = ticker_exchange.get(ticker)
+        prev_close_as_of = _previous_trading_day_for_exchange(exchange, query_as_of)
+        # Strict day-change baseline: exact previous trading session close.
+        px_prev, _ = _price_close_point_on_date(
+            db,
+            ticker=ticker,
+            on_date=prev_close_as_of,
+        )
+        prev_fx_cutoff = _exchange_close_utc_naive(exchange, prev_close_as_of)
+        # Primary baseline for day FX: latest row at/before previous session
+        # close cutoff (e.g. 16:30 UTC for ENXTAM), so day FX matches session
+        # close semantics and not end-of-day rows.
+        fx_prev_row = (
+            db.query(FXRate)
+            .filter(
+                FXRate.base_currency == base_currency,
+                FXRate.quote_currency == ccy,
+                FXRate.datetime_utc <= prev_fx_cutoff,
+            )
+            .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+            .first()
+        )
+        if fx_prev_row is not None and fx_prev_row.rate is not None:
+            fx_prev = _to_decimal(fx_prev_row.rate, scale=_DECIMAL_RATE_SCALE)
+        else:
+            # Fallback: previous day close row if cutoff-aligned row is absent.
+            fx_prev, _ = _fx_rate_point_on_date(
+                db,
+                base_currency=base_currency,
+                quote_currency=ccy,
+                on_date=prev_close_as_of,
+            )
+        if px_prev is not None and fx_prev is not None:
+            prev_native_value = (qty * px_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
+            prev_value = (prev_native_value * fx_prev).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
         day_change = Decimal("0")
         day_change_pct = Decimal("0")
         price_return_value = Decimal("0")
         fx_return_value = Decimal("0")
-        if prev_value is not None:
+        market_open_now = _is_exchange_open_now(exchange, now_utc)
+        has_current_session_point = (px_date == query_as_of)
+        # Show day change during market hours OR once a current-session point exists
+        # (e.g. after market close on the same trading day). Keep zero when there
+        # is no new session data (weekends/holidays/stale only).
+        if prev_value is not None and (market_open_now or has_current_session_point):
             day_change = (market_value - prev_value).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             if prev_value != Decimal("0"):
                 day_change_pct = ((day_change / prev_value) * Decimal("100")).quantize(
@@ -4584,6 +5255,79 @@ def _latest_price_on_or_before(
     return _to_decimal(fallback.close)
 
 
+def _latest_price_point_on_or_before(
+    db: Session,
+    *,
+    ticker: str,
+    as_of_date: date,
+) -> tuple[Decimal | None, date | None]:
+    row = (
+        db.query(PriceHistory)
+        .filter(
+            PriceHistory.ticker == ticker,
+            PriceHistory.datetime_utc <= datetime(as_of_date.year, as_of_date.month, as_of_date.day, 23, 59, 59),
+        )
+        .order_by(PriceHistory.datetime_utc.desc(), PriceHistory.id.desc())
+        .first()
+    )
+    if row is not None and row.price is not None and row.datetime_utc is not None:
+        return _to_decimal(row.price), row.datetime_utc.date()
+    fallback = (
+        db.query(PricesHistory)
+        .filter(
+            PricesHistory.ticker == ticker,
+            PricesHistory.date <= as_of_date,
+        )
+        .order_by(PricesHistory.date.desc(), PricesHistory.id.desc())
+        .first()
+    )
+    if fallback is None or fallback.close is None or fallback.date is None:
+        return None, None
+    return _to_decimal(fallback.close), fallback.date
+
+
+def _legacy_close_point_on_date(
+    db: Session,
+    *,
+    ticker: str,
+    on_date: date,
+) -> tuple[Decimal | None, date | None]:
+    """Return daily close on an exact date from legacy prices_history."""
+    fallback = (
+        db.query(PricesHistory)
+        .filter(
+            PricesHistory.ticker == ticker,
+            PricesHistory.date == on_date,
+        )
+        .order_by(PricesHistory.id.desc())
+        .first()
+    )
+    if fallback is None or fallback.close is None or fallback.date is None:
+        return None, None
+    return _to_decimal(fallback.close), fallback.date
+
+
+def _price_close_point_on_date(
+    db: Session,
+    *,
+    ticker: str,
+    on_date: date,
+) -> tuple[Decimal | None, date | None]:
+    row = (
+        db.query(PriceHistory)
+        .filter(
+            PriceHistory.ticker == ticker,
+            PriceHistory.datetime_utc >= datetime(on_date.year, on_date.month, on_date.day, 0, 0, 0),
+            PriceHistory.datetime_utc <= datetime(on_date.year, on_date.month, on_date.day, 23, 59, 59),
+        )
+        .order_by(PriceHistory.datetime_utc.desc(), PriceHistory.id.desc())
+        .first()
+    )
+    if row is not None and row.price is not None and row.datetime_utc is not None:
+        return _to_decimal(row.price), row.datetime_utc.date()
+    return _legacy_close_point_on_date(db, ticker=ticker, on_date=on_date)
+
+
 def _latest_price_timestamp_on_or_before(
     db: Session,
     *,
@@ -4639,6 +5383,99 @@ def _latest_fx_rate_on_or_before(
     if row is None or row.rate is None:
         return None
     return _to_decimal(row.rate, scale=_DECIMAL_RATE_SCALE)
+
+
+def _latest_fx_rate_point_on_or_before(
+    db: Session,
+    *,
+    base_currency: str,
+    quote_currency: str,
+    as_of_date: date,
+) -> tuple[Decimal | None, date | None]:
+    base = (base_currency or "").strip().upper()
+    quote = (quote_currency or "").strip().upper()
+    if base == quote:
+        return Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP), as_of_date
+    row = (
+        db.query(FXRate)
+        .filter(
+            FXRate.base_currency == base,
+            FXRate.quote_currency == quote,
+            FXRate.datetime_utc <= datetime(as_of_date.year, as_of_date.month, as_of_date.day, 23, 59, 59),
+        )
+        .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+        .first()
+    )
+    if row is None or row.rate is None or row.datetime_utc is None:
+        try:
+            fx = _lookup_close_fx_rate(
+                db,
+                quote_currency=quote,
+                base_currency=base,
+                on_date=as_of_date,
+            )
+            return _to_decimal(fx, scale=_DECIMAL_RATE_SCALE), as_of_date
+        except PortfolioEngineError:
+            return None, None
+    return _to_decimal(row.rate, scale=_DECIMAL_RATE_SCALE), row.datetime_utc.date()
+
+
+def _latest_fx_rate_point_on_or_before_dt(
+    db: Session,
+    *,
+    base_currency: str,
+    quote_currency: str,
+    as_of_dt: datetime,
+) -> tuple[Decimal | None, date | None]:
+    base = (base_currency or "").strip().upper()
+    quote = (quote_currency or "").strip().upper()
+    if base == quote:
+        return Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP), as_of_dt.date()
+    row = (
+        db.query(FXRate)
+        .filter(
+            FXRate.base_currency == base,
+            FXRate.quote_currency == quote,
+            FXRate.datetime_utc <= as_of_dt,
+        )
+        .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+        .first()
+    )
+    if row is None or row.rate is None or row.datetime_utc is None:
+        return _latest_fx_rate_point_on_or_before(
+            db,
+            base_currency=base,
+            quote_currency=quote,
+            as_of_date=as_of_dt.date(),
+        )
+    return _to_decimal(row.rate, scale=_DECIMAL_RATE_SCALE), row.datetime_utc.date()
+
+
+def _fx_rate_point_on_date(
+    db: Session,
+    *,
+    base_currency: str,
+    quote_currency: str,
+    on_date: date,
+) -> tuple[Decimal | None, date | None]:
+    base = (base_currency or "").strip().upper()
+    quote = (quote_currency or "").strip().upper()
+    if base == quote:
+        return Decimal("1").quantize(_DECIMAL_RATE_SCALE, rounding=ROUND_HALF_UP), on_date
+    row = (
+        db.query(FXRate)
+        .filter(
+            FXRate.base_currency == base,
+            FXRate.quote_currency == quote,
+            FXRate.datetime_utc >= datetime(on_date.year, on_date.month, on_date.day, 0, 0, 0),
+            FXRate.datetime_utc <= datetime(on_date.year, on_date.month, on_date.day, 23, 59, 59),
+        )
+        .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
+        .first()
+    )
+    if row is None or row.rate is None or row.datetime_utc is None:
+        return None, None
+    return _to_decimal(row.rate, scale=_DECIMAL_RATE_SCALE), row.datetime_utc.date()
 
 
 def _fetch_fx_daily_close_rows(
@@ -4726,7 +5563,12 @@ def _legacy_fx_daily_rows(
     return sorted(by_date.items(), key=lambda x: x[0])
 
 
-def backfill_fx_history_if_missing(portfolio_id: str, db: Session) -> dict[str, object]:
+def backfill_fx_history_if_missing(
+    portfolio_id: str,
+    db: Session,
+    *,
+    to_date_override: date | None = None,
+) -> dict[str, object]:
     portfolio = get_portfolio_or_error(db, portfolio_id)
     tx_rows = _sorted_active_transactions_for_window(db, portfolio_id, include_generated=False)
     if not tx_rows:
@@ -4756,7 +5598,11 @@ def backfill_fx_history_if_missing(portfolio_id: str, db: Session) -> dict[str, 
 
     earliest_tx = min(r.trade_date for r in tx_rows)
     latest_build = _latest_completed_equity_build(db, portfolio_id)
-    to_d = latest_build.to_date if latest_build and latest_build.to_date else date.today()
+    to_d = (
+        to_date_override
+        if to_date_override is not None
+        else (latest_build.to_date if latest_build and latest_build.to_date else date.today())
+    )
     if to_d < earliest_tx:
         to_d = earliest_tx
 
@@ -4767,17 +5613,20 @@ def backfill_fx_history_if_missing(portfolio_id: str, db: Session) -> dict[str, 
     for quote in required_quotes:
         if quote == base_currency:
             continue
-        # Already sufficient for rebuild fallback behavior if we have any prior row <= to_d.
-        has_any = (
-            db.query(FXRate.id)
+        latest_existing_dt = (
+            db.query(FXRate.datetime_utc)
             .filter(
                 FXRate.base_currency == base_currency,
                 FXRate.quote_currency == quote,
                 FXRate.datetime_utc <= end_dt,
             )
+            .order_by(FXRate.datetime_utc.desc(), FXRate.id.desc())
             .first()
         )
-        if has_any:
+        fetch_start = earliest_tx
+        if latest_existing_dt and latest_existing_dt[0] is not None:
+            fetch_start = latest_existing_dt[0].date() + timedelta(days=1)
+        if fetch_start > to_d:
             continue
 
         fetched_pairs.append(f"{quote}->{base_currency}")
@@ -4786,7 +5635,7 @@ def backfill_fx_history_if_missing(portfolio_id: str, db: Session) -> dict[str, 
             daily_rows = _fetch_fx_daily_close_rows(
                 base_currency=base_currency,
                 quote_currency=quote,
-                start_date=earliest_tx,
+                start_date=fetch_start,
                 end_date=to_d,
             )
         except Exception as exc:
@@ -4802,7 +5651,7 @@ def backfill_fx_history_if_missing(portfolio_id: str, db: Session) -> dict[str, 
                 db=db,
                 base_currency=base_currency,
                 quote_currency=quote,
-                start_date=earliest_tx,
+                start_date=fetch_start,
                 end_date=to_d,
             )
         if daily_rows:
@@ -4879,25 +5728,15 @@ def _open_lot_basis_details_upto(
             if shares <= Decimal("0"):
                 continue
             ticker_ccy = (ticker_currency.get(ticker) or base_currency).strip().upper()
-            base_amount = _tx_base_amount(tx)
+            base_amount = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
             base_unit = (base_amount / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
             local_unit = _to_decimal(tx.price)
+            # local_unit must stay in the trade/native currency and must not be derived
+            # from already-converted base amounts, otherwise legacy mismatches (e.g. EUR
+            # trades persisted with USD currency labels) get double-converted.
             tx_ccy = (tx.currency or base_currency).strip().upper() or base_currency
             if ticker_ccy != tx_ccy:
-                # Keep holdings rendering deterministic even when historical execution FX
-                # cannot be resolved for legacy transactions with mismatched tx/native currency.
-                # In that case we preserve stored transaction unit price as local unit proxy.
-                try:
-                    fx_exec = _lookup_close_fx_rate(
-                        db,
-                        quote_currency=ticker_ccy,
-                        base_currency=base_currency,
-                        on_date=tx.trade_date,
-                    )
-                    local_total = (base_amount / fx_exec).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
-                    local_unit = (local_total / shares).quantize(_DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP)
-                except PortfolioEngineError:
-                    local_unit = _to_decimal(tx.price)
+                local_unit = _to_decimal(tx.price)
             lots[ticker].append((shares, local_unit, base_unit))
         elif tx.tx_type == "Sell":
             remaining = shares
@@ -4940,6 +5779,7 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
     as_of = latest_row.date
     base_currency = (portfolio.base_currency or "USD").strip().upper() or "USD"
+    ticker_currency = _ticker_currency_map_or_error(db, portfolio_id)
 
     realized_gain = (
         db.query(ClosedPosition)
@@ -4971,7 +5811,10 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         )
         .all()
     )
-    dividend_total = sum((_tx_base_amount(tx) for tx in dividend_rows), Decimal("0")).quantize(
+    dividend_total = sum(
+        (_tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency) for tx in dividend_rows),
+        Decimal("0"),
+    ).quantize(
         _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
     )
     dividend_gross_total = Decimal("0")
@@ -4982,7 +5825,11 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         withholding_native = _to_decimal(meta.get("withholding_amount_native"))
         if gross_native == Decimal("0") and withholding_native == Decimal("0"):
             # Manual dividend entries are already net values.
+<<<<<<< HEAD
+            base_amount = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
+=======
             base_amount = _tx_base_amount(tx)
+>>>>>>> origin/main
             dividend_gross_total += base_amount
             continue
         fx_exec = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
@@ -5003,7 +5850,10 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         )
         .all()
     )
-    invested_capital = sum((_tx_base_amount(tx) for tx in invested_rows), Decimal("0")).quantize(
+    invested_capital = sum(
+        (_tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency) for tx in invested_rows),
+        Decimal("0"),
+    ).quantize(
         _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
     )
 
@@ -5081,33 +5931,66 @@ def _compute_return_pct(
 
 def compute_time_returns(db: Session, portfolio_id: str) -> dict[str, float | None]:
     get_portfolio_or_error(db, portfolio_id)
+    settings = _load_portfolio_settings(db, portfolio_id)
+    cash_mode = str(settings.get("cash_management_mode") or "track_cash").strip().lower()
     rows = _resolve_latest_equity_rows(db, portfolio_id)
     if not rows:
         raise PortfolioEngineError(f"No equity history rows found for portfolio '{portfolio_id}'.")
 
     latest = rows[-1]
-    latest_value = _to_decimal(latest.total_equity)
+    use_twr = cash_mode == "ignore_cash"
 
-    inception_row = rows[0]
-    inception_value = _to_decimal(inception_row.total_equity)
-    since_inception = _compute_return_pct(latest_value, inception_value)
+    if use_twr:
+        latest_value = _to_decimal(latest.twr_index if latest.twr_index is not None else 1.0)
+        inception_row = rows[0]
+        inception_value = _to_decimal(inception_row.twr_index if inception_row.twr_index is not None else 1.0)
+        since_inception = _compute_return_pct(latest_value, inception_value)
 
-    ytd_start = date(latest.date.year, 1, 1)
-    ytd_row = next((r for r in rows if r.date >= ytd_start), None)
-    ytd_return = None
-    if ytd_row is not None:
-        ytd_return = _compute_return_pct(latest_value, _to_decimal(ytd_row.total_equity))
+        ytd_start = date(latest.date.year, 1, 1)
+        ytd_row = next((r for r in rows if r.date >= ytd_start), None)
+        ytd_return = None
+        if ytd_row is not None:
+            ytd_return = _compute_return_pct(
+                latest_value,
+                _to_decimal(ytd_row.twr_index if ytd_row.twr_index is not None else 1.0),
+            )
 
-    one_year_return = None
-    one_year_anchor = latest.date - timedelta(days=365)
-    if rows[0].date <= one_year_anchor:
-        one_year_row = None
-        for r in reversed(rows):
-            if r.date <= one_year_anchor:
-                one_year_row = r
-                break
-        if one_year_row is not None:
-            one_year_return = _compute_return_pct(latest_value, _to_decimal(one_year_row.total_equity))
+        one_year_return = None
+        one_year_anchor = latest.date - timedelta(days=365)
+        if rows[0].date <= one_year_anchor:
+            one_year_row = None
+            for r in reversed(rows):
+                if r.date <= one_year_anchor:
+                    one_year_row = r
+                    break
+            if one_year_row is not None:
+                one_year_return = _compute_return_pct(
+                    latest_value,
+                    _to_decimal(one_year_row.twr_index if one_year_row.twr_index is not None else 1.0),
+                )
+    else:
+        latest_value = _to_decimal(latest.total_equity)
+
+        inception_row = rows[0]
+        inception_value = _to_decimal(inception_row.total_equity)
+        since_inception = _compute_return_pct(latest_value, inception_value)
+
+        ytd_start = date(latest.date.year, 1, 1)
+        ytd_row = next((r for r in rows if r.date >= ytd_start), None)
+        ytd_return = None
+        if ytd_row is not None:
+            ytd_return = _compute_return_pct(latest_value, _to_decimal(ytd_row.total_equity))
+
+        one_year_return = None
+        one_year_anchor = latest.date - timedelta(days=365)
+        if rows[0].date <= one_year_anchor:
+            one_year_row = None
+            for r in reversed(rows):
+                if r.date <= one_year_anchor:
+                    one_year_row = r
+                    break
+            if one_year_row is not None:
+                one_year_return = _compute_return_pct(latest_value, _to_decimal(one_year_row.total_equity))
 
     return {
         "since_inception_return_pct": since_inception,

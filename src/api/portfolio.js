@@ -45,6 +45,10 @@ export function processPortfolio(portfolioId, { strict = false } = {}) {
   return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/process${qs}`, { method: "POST" });
 }
 
+export function refreshPortfolioPrices(portfolioId) {
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/refresh-prices`, { method: "POST" });
+}
+
 export function rebuildPortfolioEquityHistory(
   portfolioId,
   { mode = "incremental", force = false, strict = false } = {}
@@ -187,6 +191,11 @@ export function listPortfolioTransactions(portfolioId) {
       metadata: tx.metadata ?? null,
       is_generated: Boolean(tx.is_generated),
       generated_event_id: tx.generated_event_id ?? null,
+<<<<<<< HEAD
+      fx_at_execution: tx.fx_at_execution ?? null,
+      gross_amount_base: tx.gross_amount_base ?? null,
+=======
+>>>>>>> origin/main
       version: tx.version,
       created_at: tx.created_at,
       updated_at: tx.updated_at,
@@ -195,12 +204,12 @@ export function listPortfolioTransactions(portfolioId) {
     return { ...res, data: { ...(res?.data || {}), transactions: mapped } };
   };
 
-  return apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" })
+  return apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" })
     .then(normalize)
     .catch(async (err) => {
       const msg = String(err?.message || "");
       if (!msg.includes("404") && !msg.includes("Not Found")) throw err;
-      const res = await apiFetch(`/portfolios/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" });
+      const res = await apiFetch(`/portfolio/${encodeURIComponent(portfolioId)}/transactions`, { method: "GET" });
       return normalize(res);
     });
 }
