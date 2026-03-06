@@ -191,8 +191,11 @@ export function listPortfolioTransactions(portfolioId) {
       metadata: tx.metadata ?? null,
       is_generated: Boolean(tx.is_generated),
       generated_event_id: tx.generated_event_id ?? null,
+<<<<<<< HEAD
       fx_at_execution: tx.fx_at_execution ?? null,
       gross_amount_base: tx.gross_amount_base ?? null,
+=======
+>>>>>>> origin/main
       version: tx.version,
       created_at: tx.created_at,
       updated_at: tx.updated_at,

@@ -174,8 +174,11 @@ function computeOpenLotsForTicker(rows) {
         trade_date: tx.trade_date,
         shares_open: shares,
         price,
+<<<<<<< HEAD
         currency: tx.currency || "USD",
         fx_at_execution: tx.fx_at_execution ?? null,
+=======
+>>>>>>> origin/main
       });
       continue;
     }
@@ -360,10 +363,14 @@ export default function Portfolio() {
     setHoldingDetailTabByTicker((prev) => ({ ...prev, [ticker]: tab }));
   };
 
+<<<<<<< HEAD
   const openAddTxForTicker = (ticker, baseLastPrice, nativeCurrency, nativeLastPrice) => {
     const portfolioBase = selectedPortfolio?.base_currency || "USD";
     const useNative = Boolean(nativeCurrency) && nativeCurrency !== portfolioBase;
     const defaultPrice = useNative ? nativeLastPrice : baseLastPrice;
+=======
+  const openAddTxForTicker = (ticker, lastPrice) => {
+>>>>>>> origin/main
     setEditTxId(null);
     setTxForm({
       ...EMPTY_TX,
@@ -371,8 +378,13 @@ export default function Portfolio() {
       type: "Buy",
       trade_date: new Date().toISOString().slice(0, 10),
       shares: "",
+<<<<<<< HEAD
       price: defaultPrice != null && !Number.isNaN(Number(defaultPrice)) ? String(Number(defaultPrice)) : "",
       currency: useNative ? nativeCurrency : portfolioBase,
+=======
+      price: lastPrice != null && !Number.isNaN(Number(lastPrice)) ? String(Number(lastPrice)) : "",
+      currency: selectedPortfolio?.base_currency || "USD",
+>>>>>>> origin/main
       note: "",
     });
     setShowTxModal(true);
@@ -613,6 +625,15 @@ export default function Portfolio() {
       await loadEquityHistory(selectedPortfolioId);
     })();
   }, [selectedPortfolioId, loadEquityHistory]);
+
+  React.useEffect(() => {
+    if (!portfolioSettings) {
+      setWithholdingInput("");
+      return;
+    }
+    const value = portfolioSettings?.dividend_withholding_percent;
+    setWithholdingInput(value === null || value === undefined ? "" : String(value));
+  }, [portfolioSettings]);
 
   React.useEffect(() => {
     if (!portfolioSettings) {
@@ -1248,6 +1269,7 @@ export default function Portfolio() {
                                 </div>
                               </td>
                               <td className="py-2 px-2">Open</td>
+<<<<<<< HEAD
                               <td className="py-2 px-2">{fmtShares(row.quantity)}</td>
                               <td className="py-2 px-2">
                                 {fmtCurrency(
@@ -1259,10 +1281,15 @@ export default function Portfolio() {
                                     : displayCurrency
                                 )}
                               </td>
+=======
+                              <td className="py-2 px-2">{fmtNumber(row.quantity, 6)}</td>
+                              <td className="py-2 px-2">{fmtCurrency(row.market_price, displayCurrency)}</td>
+>>>>>>> origin/main
                               <td className="py-2 px-2">{fmtCurrency(row.avg_cost_basis_native, row.native_currency || displayCurrency)}</td>
                               <td className="py-2 px-2">{fmtCurrency(row.total_cost_basis, displayCurrency)}</td>
                               <td className="py-2 px-2">{fmtCurrency(row.market_value, displayCurrency)}</td>
                               <td className="py-2 px-2">{fmtCurrency(row.total_dividends, displayCurrency)}</td>
+<<<<<<< HEAD
                               <td className={`py-2 px-2 whitespace-nowrap ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                                 {fmtSignedPercent(row.day_change_percent)}
                               </td>
@@ -1280,6 +1307,25 @@ export default function Portfolio() {
                               </td>
                               <td className={`py-2 px-2 whitespace-nowrap ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
                                 {fmtSignedCurrency(row.realized_gain_value, displayCurrency)}
+=======
+                              <td className={`py-2 px-2 ${(Number(row.day_change_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtPercent(row.day_change_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.day_change_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.day_change_value, displayCurrency)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.unrealized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtPercent(row.unrealized_gain_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.unrealized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.unrealized_gain_value, displayCurrency)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.realized_gain_percent || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {row.realized_gain_percent == null ? "--" : fmtPercent(row.realized_gain_percent)}
+                              </td>
+                              <td className={`py-2 px-2 ${(Number(row.realized_gain_value || 0) >= 0) ? "text-emerald-700" : "text-red-600"}`}>
+                                {fmtCurrency(row.realized_gain_value, displayCurrency)}
+>>>>>>> origin/main
                               </td>
                             </tr>
                             {isExpanded && (
@@ -1311,6 +1357,7 @@ export default function Portfolio() {
                                       <Button
                                         size="sm"
                                         variant="outline"
+<<<<<<< HEAD
                                         onClick={() =>
                                           openAddTxForTicker(
                                             ticker,
@@ -1319,6 +1366,9 @@ export default function Portfolio() {
                                             row.market_price_native
                                           )
                                         }
+=======
+                                        onClick={() => openAddTxForTicker(ticker, row.market_price)}
+>>>>>>> origin/main
                                       >
                                         Add Transaction
                                       </Button>
@@ -1333,15 +1383,19 @@ export default function Portfolio() {
                                               <th className="text-left py-1">Shares Open</th>
                                               <th className="text-left py-1">Cost/Share</th>
                                               <th className="text-left py-1">Total Cost</th>
+<<<<<<< HEAD
                                               <th className="text-left py-1">Market Value</th>
                                               <th className="text-left py-1">Day Gain UNRL (%)</th>
                                               <th className="text-left py-1">Day Gain UNRL ({displayCurrency})</th>
                                               <th className="text-left py-1">Tot Gain UNRL (%)</th>
                                               <th className="text-left py-1">Tot Gain UNRL ({displayCurrency})</th>
+=======
+>>>>>>> origin/main
                                             </tr>
                                           </thead>
                                           <tbody>
                                             {tickerLots.length === 0 ? (
+<<<<<<< HEAD
                                               <tr><td colSpan={9} className="py-2 text-slate-500">No open lots for {ticker}.</td></tr>
                                             ) : tickerLots.map((lot) => (
                                               (() => {
@@ -1388,6 +1442,16 @@ export default function Portfolio() {
                                                   </tr>
                                                 );
                                               })()
+=======
+                                              <tr><td colSpan={4} className="py-2 text-slate-500">No open lots for {ticker}.</td></tr>
+                                            ) : tickerLots.map((lot) => (
+                                              <tr key={lot.id} className="border-b">
+                                                <td className="py-1">{lot.trade_date}</td>
+                                                <td className="py-1">{fmtNumber(lot.shares_open, 6)}</td>
+                                                <td className="py-1">{fmtCurrency(lot.price, displayCurrency)}</td>
+                                                <td className="py-1">{fmtCurrency(Number(lot.shares_open) * Number(lot.price), displayCurrency)}</td>
+                                              </tr>
+>>>>>>> origin/main
                                             ))}
                                           </tbody>
                                         </table>
@@ -1410,6 +1474,7 @@ export default function Portfolio() {
                                           <tbody>
                                             {tickerTx.length === 0 ? (
                                               <tr><td colSpan={6} className="py-2 text-slate-500">No transactions for {ticker}.</td></tr>
+<<<<<<< HEAD
                                             ) : tickerTx.map((tx) => {
                                               const txCurrency = String(tx.currency || "").toUpperCase();
                                               const nativeCurrencyForRow = row.native_currency || displayCurrency;
@@ -1441,6 +1506,25 @@ export default function Portfolio() {
                                                 </tr>
                                               );
                                             })}
+=======
+                                            ) : tickerTx.map((tx) => (
+                                              <tr key={tx.id} className="border-b">
+                                                <td className="py-1">{tx.trade_date}</td>
+                                                <td className="py-1">{tx.type}</td>
+                                                <td className="py-1">{fmtNumber(tx.shares, 6)}</td>
+                                                <td className="py-1">{fmtCurrency(tx.price, displayCurrency)}</td>
+                                                <td className="py-1">{fmtCurrency((Number(tx.shares || 0) || 0) * (Number(tx.price || 0) || 0), displayCurrency)}</td>
+                                                <td className="py-1">
+                                                  <div className="flex gap-1">
+                                                    <Button size="sm" variant="outline" onClick={() => openEditTx(tx)}>Edit</Button>
+                                                    <Button size="sm" variant="outline" onClick={() => deleteTx(tx.id)} disabled={deletingTxId === tx.id}>
+                                                      {deletingTxId === tx.id ? "Deleting..." : "Delete"}
+                                                    </Button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            ))}
+>>>>>>> origin/main
                                           </tbody>
                                         </table>
                                       </div>

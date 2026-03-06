@@ -65,8 +65,11 @@ _LEDGER_ACTION_TYPES = {"SPLIT", "REVERSE_SPLIT", "DIVIDEND", "SPINOFF", "TICKER
 _DECIMAL_MONEY_SCALE = Decimal("0.0000000001")
 _DECIMAL_RATE_SCALE = Decimal("0.000000000001")
 _EQUITY_ENGINE_VERSION = "phase14-v1"
+<<<<<<< HEAD
 _US_MARKET_EXCHANGES = {"NYSE", "NASDAQ", "NASDAQGS", "NASDAQGM", "NASDAQCM", "AMEX", "BATS", "ARCA"}
 _EU_MARKET_EXCHANGES = {"ENXTAM", "ENXTPA", "XPAR", "AMS"}
+=======
+>>>>>>> origin/main
 
 _EXCHANGE_NATIVE_CCY: dict[str, str] = {
     "NYSE": "USD",
@@ -4353,7 +4356,11 @@ def rebuild_equity_history(
             for tx in tx_by_date.get(d, []):
                 ticker = tx.ticker_symbol_normalized
                 shares = _to_decimal(tx.shares)
+<<<<<<< HEAD
                 gross_base = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
+=======
+                gross_base = _tx_base_amount(tx)
+>>>>>>> origin/main
                 ticker_ccy = (ticker_currency.get(ticker) or base_currency).strip().upper() or base_currency
                 tx_local_notional = (shares * _to_decimal(tx.price)).quantize(
                     _DECIMAL_MONEY_SCALE, rounding=ROUND_HALF_UP
@@ -5818,7 +5825,11 @@ def compute_performance_breakdown(db: Session, portfolio_id: str) -> dict[str, f
         withholding_native = _to_decimal(meta.get("withholding_amount_native"))
         if gross_native == Decimal("0") and withholding_native == Decimal("0"):
             # Manual dividend entries are already net values.
+<<<<<<< HEAD
             base_amount = _tx_base_amount(tx, db=db, base_currency=base_currency, ticker_currency=ticker_currency)
+=======
+            base_amount = _tx_base_amount(tx)
+>>>>>>> origin/main
             dividend_gross_total += base_amount
             continue
         fx_exec = _to_decimal(tx.fx_at_execution, scale=_DECIMAL_RATE_SCALE)
