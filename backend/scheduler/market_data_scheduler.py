@@ -201,6 +201,21 @@ def start_market_data_scheduler() -> None:
         id="phase14_dividend_refresh",
         replace_existing=True,
     )
+
+    # Projection trigger checker — staggered 3 min after price fetch so LatestPrice is warm
+    try:
+        from backend.scheduler.projection_trigger_scheduler import run_projection_trigger_check_job
+        scheduler.add_job(
+            run_projection_trigger_check_job,
+            "interval",
+            minutes=20,
+            id="projection_trigger_check",
+            replace_existing=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Failed to register projection trigger checker: %s", exc)
+
     scheduler.start()
     _scheduler = scheduler
     logger.info("Phase 12A market-data scheduler started.")

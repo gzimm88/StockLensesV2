@@ -1,5 +1,6 @@
 import Layout from "./Layout.jsx";
 
+import ControlCenter from "./ControlCenter";
 import Screener from "./Screener";
 
 import Lenses from "./Lenses";
@@ -7,11 +8,17 @@ import Lenses from "./Lenses";
 import Projection from "./Projection";
 import Portfolio from "./Portfolio";
 import Portfolios from "./Portfolios";
+import Login from "./Login";
+import AdminAccounts from "./AdminAccounts";
+import Notifications from "./Notifications";
+import Snapshots from "./Snapshots";
+import WatchlistPage from "./Watchlist";
 
 import { BrowserRouter as Router, Route, Routes, useLocation } from 'react-router-dom';
 
 const PAGES = {
-    
+
+    ControlCenter: ControlCenter,
     Screener: Screener,
     
     Lenses: Lenses,
@@ -19,7 +26,11 @@ const PAGES = {
     Projection: Projection,
     Portfolio: Portfolio,
     Portfolios: Portfolios,
-    
+    Accounts: AdminAccounts,
+    Notifications: Notifications,
+    Snapshots: Snapshots,
+    Watchlist: WatchlistPage,
+
 }
 
 function _getCurrentPage(url) {
@@ -44,7 +55,8 @@ function PagesContent() {
         <Layout currentPageName={currentPage}>
             <Routes>            
                 
-                    <Route path="/" element={<Screener />} />
+                    <Route path="/" element={<ControlCenter />} />
+                <Route path="/controlcenter" element={<ControlCenter />} />
                 
                 
                 <Route path="/Screener" element={<Screener />} />
@@ -55,6 +67,14 @@ function PagesContent() {
                 <Route path="/Portfolio" element={<Portfolio />} />
                 <Route path="/Portfolios" element={<Portfolios />} />
                 <Route path="/portfolios" element={<Portfolios />} />
+                <Route path="/Accounts" element={user.role === "admin" ? <AdminAccounts /> : <Navigate replace to="/" />} />
+                <Route path="/notifications" element={<Notifications />} />
+                <Route path="/Notifications" element={<Notifications />} />
+                <Route path="/snapshots" element={<Snapshots />} />
+                <Route path="/Snapshots" element={<Snapshots />} />
+                <Route path="/watchlist" element={<WatchlistPage />} />
+                <Route path="/Watchlist" element={<WatchlistPage />} />
+                <Route path="/login" element={<Navigate replace to="/" />} />
                 
             </Routes>
         </Layout>

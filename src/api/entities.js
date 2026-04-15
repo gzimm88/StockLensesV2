@@ -118,5 +118,142 @@ export const LensPreset = {
 // ---------------------------------------------------------------------------
 
 export const User = {
-  me: async () => ({ id: "local", email: "local@stocklenses.dev", full_name: "Local User" }),
+  me: () => apiFetch("/auth/me"),
+  login: (data) => apiFetch("/auth/login", { method: "POST", body: JSON.stringify(data) }),
+  logout: () => apiFetch("/auth/logout", { method: "POST" }),
+  list: () => apiFetch("/admin/users"),
+  create: (data) => apiFetch("/admin/users", { method: "POST", body: JSON.stringify(data) }),
+  update: (id, data) =>
+    apiFetch(`/admin/users/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  resetPassword: (id, data) =>
+    apiFetch(`/admin/users/${encodeURIComponent(id)}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// ProjectionAssumption
+// ---------------------------------------------------------------------------
+
+export const ProjectionAssumption = {
+  list: () => apiFetch("/projection-assumptions"),
+  upsert: (data) =>
+    apiFetch("/projection-assumptions", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// ProjectionSnapshot — frozen snapshots with BUY/SELL price triggers
+// ---------------------------------------------------------------------------
+
+function _qs(params = {}) {
+  const entries = Object.entries(params).filter(([, v]) => v != null && v !== "");
+  if (!entries.length) return "";
+  return "?" + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString();
+}
+
+export const ProjectionSnapshot = {
+  list: (params = {}) => apiFetch(`/projections/snapshots${_qs(params)}`),
+  get: (id) => apiFetch(`/projections/snapshots/${encodeURIComponent(id)}`),
+  create: (data) =>
+    apiFetch("/projections/snapshots", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (id, data) =>
+    apiFetch(`/projections/snapshots/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (id) =>
+    apiFetch(`/projections/snapshots/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// AlertNotification — triggered alert events for the Notification Center
+// ---------------------------------------------------------------------------
+
+export const AlertNotification = {
+  list: (params = {}) => apiFetch(`/projections/alerts${_qs(params)}`),
+  dismiss: (id) =>
+    apiFetch(`/projections/alerts/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+    }),
+  markRead: (id) =>
+    apiFetch(`/projections/alerts/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+    }),
+  markAllRead: () =>
+    apiFetch("/projections/alerts/read-all", { method: "POST" }),
+  delete: (id) =>
+    apiFetch(`/projections/alerts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// UserEmail — for notification destination
+// ---------------------------------------------------------------------------
+
+export const UserEmail = {
+  get: () => apiFetch("/me/email"),
+  update: (email) =>
+    apiFetch("/me/email", {
+      method: "PATCH",
+      body: JSON.stringify({ email }),
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Watchlist — unified CRUD + lifecycle actions
+// ---------------------------------------------------------------------------
+
+export const Watchlist = {
+  /** Returns the enriched watchlist summary with prices, entry, status, source. */
+  summary: () => apiFetch("/dashboard/watchlist-summary"),
+  remove: (ticker) =>
+    apiFetch(`/watchlist/${encodeURIComponent(ticker)}`, { method: "DELETE" }),
+  update: (ticker, data) =>
+    apiFetch(`/watchlist/${encodeURIComponent(ticker)}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  action: (ticker, data) =>
+    apiFetch(`/watchlist/${encodeURIComponent(ticker)}/action`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// ScreenerPreference
+// ---------------------------------------------------------------------------
+
+export const ScreenerPreference = {
+  list: () => apiFetch("/screener/preferences"),
+  upsert: (data) =>
+    apiFetch("/screener/preferences", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// MarketData
+// ---------------------------------------------------------------------------
+
+export const MarketData = {
+  refreshLatest: (data = {}) =>
+    apiFetch("/market-data/refresh", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };

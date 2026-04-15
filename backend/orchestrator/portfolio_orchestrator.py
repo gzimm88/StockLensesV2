@@ -195,6 +195,13 @@ def _to_fetch_symbol(ticker: str, source_symbol: str | None = None) -> tuple[str
         fallback = core.replace(".", "-")
         return fallback, f"WARNING[{ticker}] Unknown exchange '{exchange}' in '{source_symbol}'. Fallback symbol '{fallback}' used."
 
+    # If ticker already ends in a known Yahoo exchange suffix (e.g. MC.PA, ASML.AS),
+    # don't mangle the dot — pass it through unchanged.
+    known_suffixes = set(YAHOO_SUFFIX_BY_EXCHANGE.values())
+    upper_t = ticker.strip().upper()
+    for suffix in known_suffixes:
+        if upper_t.endswith(suffix):
+            return upper_t, None
     fallback = ticker.replace(".", "-")
     return fallback, f"WARNING[{ticker}] No exchange prefix supplied; fallback symbol '{fallback}' used."
 

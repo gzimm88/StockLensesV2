@@ -1,0 +1,42 @@
+ticker,context,fallback_days,first_missing_date,last_missing_date
+AAPL,daily valuation,64,2024-02-19,2025-03-09
+AAPL,final unrealized snapshot,1,2026-04-14,2026-04-14
+ADBE,daily valuation,33,2025-09-21,2026-04-13
+AMZN,daily valuation,1,2023-05-07,2023-05-07
+AMZN,final unrealized snapshot,1,2026-04-14,2026-04-14
+ASML,daily valuation,6,2026-02-27,2026-04-10
+AXP,daily valuation,133,2023-11-23,2026-04-13
+AZUL,daily valuation,29,2023-05-07,2024-08-04
+AZUL,final unrealized snapshot,1,2026-04-14,2026-04-14
+BA,daily valuation,65,2023-04-07,2024-12-22
+BA,final unrealized snapshot,1,2026-04-14,2026-04-14
+BABA,daily valuation,38,2023-11-23,2024-09-15
+BABA,final unrealized snapshot,1,2026-04-14,2026-04-14
+BOSS,daily valuation,67,2024-03-08,2025-04-17
+BOSS,final unrealized snapshot,1,2026-04-14,2026-04-14
+BRK.B,daily valuation,32,2025-09-28,2026-04-13
+CRM,daily valuation,49,2025-06-19,2026-04-13
+DUOL,daily valuation,38,2025-08-24,2026-04-13
+EFX,daily valuation,23,2025-11-02,2026-03-03
+EFX,final unrealized snapshot,1,2026-04-14,2026-04-14
+GD,daily valuation,4,2023-08-12,2023-09-04
+GD,final unrealized snapshot,1,2026-04-14,2026-04-14
+GOLD,daily valuation,48,2024-11-17,2025-08-17
+GOLD,final unrealized snapshot,1,2026-04-14,2026-04-14
+GOOGL,daily valuation,126,2024-03-10,2026-04-13
+JD,daily valuation,46,2023-06-19,2024-09-22
+JD,final unrealized snapshot,1,2026-04-14,2026-04-14
+MC,daily valuation,68,2024-07-19,2026-04-13
+MOH,daily valuation,105,2024-07-07,2026-04-13
+MSFT,daily valuation,21,2023-04-07,2026-04-13
+NESN,daily valuation,17,2024-12-13,2025-02-28
+NESN,final unrealized snapshot,1,2026-04-14,2026-04-14
+PAYC,daily valuation,108,2024-06-30,2026-04-13
+QCOM,final unrealized snapshot,1,2026-04-14,2026-04-14
+RTX,daily valuation,9,2023-07-29,2023-12-25
+RTX,final unrealized snapshot,1,2026-04-14,2026-04-14
+SPGI,daily valuation,30,2025-10-12,2026-04-13
+SRTS,daily valuation,70,2025-02-09,2026-04-13
+UNH,daily valuation,33,2025-09-21,2026-04-13
+V,daily valuation,33,2025-09-21,2026-04-13
+VOO,daily valuation,92,2024-06-16,2026-04-13

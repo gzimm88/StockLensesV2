@@ -44,6 +44,9 @@ import {
 import { cleanBand, bandMid } from "../components/utils/peBand";
 import { cacheLatestMosForTicker } from "../components/projections/getMos";
 import { normalizeSymbol } from "../components/utils/normalizeSymbol";
+import SaveSnapshotDialog from "../components/projections/SaveSnapshotDialog";
+import SavedSnapshotsList from "../components/projections/SavedSnapshotsList";
+import { Camera } from "lucide-react";
 
 const EPS_GROWTH_ASSUMPTIONS_KEY = "projection_eps_growth_assumptions_v1";
 
@@ -79,7 +82,9 @@ export default function Projection() {
   const [results, setResults] = useState(null);
   const [chartData, setChartData] = useState([]);
   const [yearlyData, setYearlyData] = useState(null);
-  
+  const [snapshotDialogOpen, setSnapshotDialogOpen] = useState(false);
+  const [snapshotsRefreshKey, setSnapshotsRefreshKey] = useState(0);
+
   // New state for tracking P/E sources and edits
   const [peBandSources, setPeBandSources] = useState({
     bear: "manual", // "auto" | "manual"
@@ -511,7 +516,10 @@ export default function Projection() {
     
     // Build chart data with multiple scenarios
     const selectedPricePath = pathData.pricePaths(scenarioKey);
-    const targetPath = (targetCAGR && priceToday > 0) ? pathData.years.map(t => priceToday * Math.pow(1 + targetCAGR, t)) : [];
+    // Target path = trajectory from required entry at target CAGR, ending at terminal price.
+    // Year 0 = required entry (the price you need to buy at today to hit target CAGR).
+    const targetBase = terminalData.reqEntry && terminalData.reqEntry > 0 ? terminalData.reqEntry : priceToday;
+    const targetPath = (targetCAGR && targetBase > 0) ? pathData.years.map(t => targetBase * Math.pow(1 + targetCAGR, t)) : [];
     
     const combined = pathData.years.map((year, index) => ({
       year,
@@ -527,8 +535,10 @@ export default function Projection() {
 
     const scenarioKey = tableScenario === "trend" ? "current" : tableScenario;
     const pricePath = yearlyData.pricePaths(scenarioKey);
-    const targetPath = inputs.targetCAGR ? 
-      yearlyData.years.map(t => inputs.priceToday * Math.pow(1 + inputs.targetCAGR, t)) : [];
+    // Target path anchored to required entry, not current price
+    const targetBase = results?.requiredEntry && results.requiredEntry > 0 ? results.requiredEntry : inputs.priceToday;
+    const targetPath = inputs.targetCAGR ?
+      yearlyData.years.map(t => targetBase * Math.pow(1 + inputs.targetCAGR, t)) : [];
 
     const headers = ['Year', 'EPS', 'PE', 'Price', 'TargetPath', 'PE_Bear_Source', 'PE_Mid_Source', 'PE_Bull_Source'];
     const rows = yearlyData.years.map((year, i) => [
@@ -980,6 +990,15 @@ export default function Projection() {
                         {formatPercent(results.marginOfSafety)}
                       </p>
                     </div>
+
+                    <Button
+                      onClick={() => setSnapshotDialogOpen(true)}
+                      disabled={!selectedTickerSymbol || !results}
+                      className="w-full"
+                    >
+                      <Camera className="w-4 h-4 mr-2" />
+                      Save Snapshot & Arm Triggers
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -1082,8 +1101,9 @@ export default function Projection() {
                           {yearlyData.years.map((year, i) => {
                             const scenarioKey = tableScenario === "trend" ? "current" : tableScenario;
                             const pricePath = yearlyData.pricePaths(scenarioKey);
-                            const targetPrice = inputs.targetCAGR ? 
-                              inputs.priceToday * Math.pow(1 + inputs.targetCAGR, year) : null;
+                            const targetBase = results?.requiredEntry && results.requiredEntry > 0 ? results.requiredEntry : inputs.priceToday;
+                            const targetPrice = inputs.targetCAGR ?
+                              targetBase * Math.pow(1 + inputs.targetCAGR, year) : null;
                             
                             return (
                               <TableRow key={year}>
@@ -1103,10 +1123,29 @@ export default function Projection() {
                   </CardContent>
                 </Card>
               )}
+              {selectedTickerSymbol && (
+                <SavedSnapshotsList
+                  tickerSymbol={selectedTickerSymbol}
+                  currentPrice={Number(inputs.priceToday) || null}
+                  refreshKey={snapshotsRefreshKey}
+                />
+              )}
             </>
           )}
         </div>
       </div>
+
+      <SaveSnapshotDialog
+        open={snapshotDialogOpen}
+        onOpenChange={setSnapshotDialogOpen}
+        tickerSymbol={selectedTickerSymbol}
+        inputs={inputs}
+        manualPE={manualPE}
+        scenario={scenario}
+        yearlyData={yearlyData}
+        results={results}
+        onSaved={() => setSnapshotsRefreshKey((k) => k + 1)}
+      />
     </div>
   );
 }

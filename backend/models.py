@@ -4,6 +4,178 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.database import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String, unique=True, nullable=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="user", index=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active", index=True)
+    must_reset_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AccountLimit(Base):
+    __tablename__ = "account_limits"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), unique=True, index=True)
+    max_screener_tickers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_portfolio_tickers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_portfolios: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    can_manage_users: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    can_use_projection: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    can_export: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    trial_ends_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AccountWatchlistEntry(Base):
+    __tablename__ = "account_watchlist_entries"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ticker_symbol", name="uq_account_watchlist_user_ticker"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    frozen_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frozen_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    frozen_from_projection_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Custom entry price override (used when no frozen_entry_price exists; manually set on watchlist)
+    custom_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-watchlist custom BUY/SELL triggers (used when no active snapshot is attached).
+    # When an active snapshot exists, the snapshot's triggers take precedence.
+    custom_buy_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    custom_sell_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Lifecycle state: "watching" | "bought" | "closed"
+    status: Mapped[str] = mapped_column(String, nullable=False, default="watching", index=True)
+    acted_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    acted_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    acted_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ProjectionAssumption(Base):
+    __tablename__ = "projection_assumptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ticker_symbol", name="uq_projection_assumptions_user_ticker"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True)
+    growth_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    years: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_bear: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_mid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_bull: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_custom_terminal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ProjectionSnapshot(Base):
+    __tablename__ = "projection_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True, nullable=False)
+    ticker_symbol: Mapped[str] = mapped_column(String, ForeignKey("tickers.symbol"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active", index=True)
+
+    # Frozen inputs
+    current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    growth_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    years: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_bear: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_mid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_bull: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pe_custom_terminal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scenario: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Frozen outputs
+    terminal_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    terminal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    implied_cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    required_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_of_safety: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yearly_data_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Trigger config
+    overvalued_pct: Mapped[float] = mapped_column(Float, nullable=False, default=15.0)
+    buy_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sell_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Trigger fire state
+    triggered_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    triggered_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    triggered_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AlertNotification(Base):
+    __tablename__ = "alert_notifications"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True, nullable=False)
+    ticker_symbol: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    alert_type: Mapped[str] = mapped_column(String, nullable=False)
+    threshold_price: Mapped[float] = mapped_column(Float, nullable=False)
+    triggered_price: Mapped[float] = mapped_column(Float, nullable=False)
+    triggered_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, index=True)
+    email_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    read_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    dismissed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    dismissed_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ScreenerPreference(Base):
+    __tablename__ = "screener_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", "lens_id", name="uq_screener_preferences_user_lens"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    lens_id: Mapped[str] = mapped_column(String, ForeignKey("lens_presets.id"), index=True)
+    buy_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    watch_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recommendation_filter: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Ticker(Base):
     __tablename__ = "tickers"
 

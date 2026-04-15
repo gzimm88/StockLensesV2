@@ -2,17 +2,22 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
-import { 
-  TrendingUp, 
-  Search, 
-  Target, 
+import { useAuth } from "@/auth/AuthContext";
+import {
+  TrendingUp,
+  Search,
+  Target,
   Layers3,
   Briefcase,
   Moon,
-  Sun
+  Sun,
+  LayoutDashboard,
+  Camera,
+  Eye
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
+import NotificationsBell from "@/components/layout/NotificationsBell";
 
 export default function Layout({ children, currentPageName }) {
   const location = useLocation();
@@ -21,9 +26,12 @@ export default function Layout({ children, currentPageName }) {
   React.useEffect(() => setMounted(true), []);
   
   const navigation = [
+    { name: "Dashboard", href: "/", icon: LayoutDashboard },
     { name: "Screener", href: createPageUrl("Screener"), icon: Search },
     { name: "Lenses", href: createPageUrl("Lenses"), icon: Layers3 },
     { name: "Projection", href: createPageUrl("Projection"), icon: Target },
+    { name: "Watchlist", href: "/watchlist", icon: Eye },
+    { name: "Snapshots", href: "/snapshots", icon: Camera },
     { name: "Portfolio", href: createPageUrl("Portfolio"), icon: Briefcase },
   ];
 
@@ -36,7 +44,7 @@ export default function Layout({ children, currentPageName }) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             <div className="flex items-center space-x-8">
-              <Link to={createPageUrl("Screener")} className="flex items-center space-x-3">
+              <Link to="/" className="flex items-center space-x-3">
                 <div className="w-10 h-10 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl flex items-center justify-center">
                   <TrendingUp className="w-6 h-6 text-amber-400" />
                 </div>
@@ -68,6 +76,24 @@ export default function Layout({ children, currentPageName }) {
             </div>
             
             <div className="flex items-center space-x-4">
+              {accountActions.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <Link
+                    key={item.name}
+                    to={item.href}
+                    className={`hidden md:flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                      isActive(item.href)
+                        ? "bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                        : "text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-900"
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{item.name}</span>
+                  </Link>
+                );
+              })}
+              <NotificationsBell />
               <Button
                 variant="outline"
                 size="icon"
